@@ -2,40 +2,36 @@
 
 [English](README.md)
 
-`openapi-codegen` 是一个以 comptime 为核心的 Zig OpenAPI 代码生成库。
-它不会额外产出一个新的 `generated.zig` 文件，而是在编译期把嵌入进来的 OpenAPI 文档直接转成 Zig 类型。
+面向 Zig 的 **comptime OpenAPI 3.x** 方案：在编译期解析文档，通过 `**codegen.models`**、`**codegen.client**`、`**codegen.server**` 生成类型与操作入口，**不会**单独落盘 `generated.zig`——生成结果在类型系统里。
 
-## 目录
+## 环境要求
 
-1. [这是什么项目](#这是什么项目)
-2. [如何使用](#如何使用)
-3. [致谢](#致谢)
+- **Zig** ≥ `0.15.2`（见 `build.zig.zon`）
+- **[embed-zig](https://github.com/embed-zig/embed-zig)**：提供 `embed`、`embed_std`、`net`、`context` 等
 
-## 这是什么项目
+## 能力概览
 
-这个项目的重点是编译期生成：
 
-- 用 `openapi.json.parse(@embedFile(...))` 在 comptime 解析 OpenAPI 文档
-- 用 `codegen.models.make(...)` 生成强类型 models
-- 用 `codegen.client.make(...)` 生成强类型 client
-- 用 `codegen.server.make(...)` 生成强类型 server
+| 模块                               | 作用                                                                                           |
+| -------------------------------- | -------------------------------------------------------------------------------------------- |
+| `**openapi`**（`lib/openapi.zig`） | JSON → `Spec`；`**Files**` 挂载多文档，支持跨文件 `**$ref**`                                             |
+| `**codegen.models**`             | `**codegen.models.make(files)**` → schema 对应 model 类型                                        |
+| `**codegen.client**`             | `**codegen.client.make(embed, files)**` → `**ClientApi**`，操作为 `**operations.<operationId>**` |
+| `**codegen.server**`             | `**codegen.server.make(embed, files)**` → 严格 handler 注册                                      |
 
-最重要的一点是：生成结果存在于 Zig 的类型系统里，而不是磁盘上的新文件里。
 
-- 不需要额外跑一个会写文件的 codegen 步骤
-- 不需要提交生成产物
-- 不需要维护“先生成、再编译”的工作流
-- 只需要嵌入 spec、调用 `make(...)`，然后直接使用返回的类型
+示例里通常写 `**const embed = @import("embed_std").std;**`，与 `**std**` 混用。
 
-这很适合希望享受代码生成的收益，但又想把整个流程保持在标准 Zig 构建里的项目。
+## 克隆后自测
 
-## 如何使用
+```sh
+zig build test     # tests/oapi-codegen/ 夹具
+zig build example # 运行 tests/examples/（含 petstore）
+```
 
-先在你的 `build.zig.zon` 里加入本项目和 `embed_zig`，可以用 `zig fetch --save`，也可以在本地开发时直接配 path dependency。
+## 在你自己的工程里依赖
 
-最简单的接入方式，是用最普通的 `std.Build` 做一个自己的库模块，然后在这个模块里把 comptime 生成出来的 API 暴露出去。
-
-### `build.zig`
+在 `**build.zig.zon**` 声明 `**openapi_codegen**` 与 `**embed_zig**`；远端包用 `**zig fetch --save**` 写入 `**.hash**`。下面 `**build.zig**` 接线与本仓库一致。
 
 ```zig
 const std = @import("std");
@@ -44,116 +40,159 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const openapi_codegen = b.dependency("openapi_codegen", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const embed_zig = b.dependency("embed_zig", .{
+    const embed_dep = b.dependency("embed_zig", .{ .target = target, .optimize = optimize });
+    const og = b.dependency("openapi_codegen", .{ .target = target, .optimize = optimize });
+
+    const openapi_mod = b.addModule("openapi", .{
+        .root_source_file = og.path("lib/openapi.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const lib = b.addLibrary(.{
-        .name = "demo_api",
-        .linkage = .static,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/root.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "openapi", .module = openapi_codegen.module("openapi") },
-                .{ .name = "codegen", .module = openapi_codegen.module("codegen") },
-                .{ .name = "embed", .module = embed_zig.module("embed") },
-                .{ .name = "net", .module = embed_zig.module("net") },
-            },
-        }),
+    const codegen_mod = b.addModule("codegen", .{
+        .root_source_file = og.path("lib/codegen.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "openapi", .module = openapi_mod },
+            .{ .name = "embed", .module = embed_dep.module("embed") },
+            .{ .name = "net", .module = embed_dep.module("net") },
+            .{ .name = "context", .module = embed_dep.module("context") },
+        },
     });
 
-    b.installArtifact(lib);
+    const app = b.addModule("app", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "openapi", .module = openapi_mod },
+            .{ .name = "codegen", .module = codegen_mod },
+            .{ .name = "embed_std", .module = embed_dep.module("embed_std") },
+            .{ .name = "net", .module = embed_dep.module("net") },
+            .{ .name = "context", .module = embed_dep.module("context") },
+        },
+    });
+
+    _ = app;
 }
 ```
 
-### `src/root.zig`
+## Spec + `ClientApi`（与 petstore 示例一致）
+
+本仓库 `**tests/examples/petstore/test.zig**` 使用 **双文件**：`**service.json`** 管 paths，`**structure.json**` 管 `**components**`；`**openapi.Files**` 里两份都要列出。下面片段与示例文件一致（节选）。
 
 ```zig
-const std = @import("std");
 const openapi = @import("openapi");
 const codegen = @import("codegen");
 
-pub const embed = @import("embed").make(std);
+const embed = @import("embed_std").std;
 
-const spec = openapi.json.parse(@embedFile("petstore.json"));
-const files: openapi.Files = .{
-    .items = &.{
-        .{
-            .name = "petstore.json",
-            .spec = spec,
+const raw_service = @embedFile("service.json");
+const raw_structure = @embedFile("structure.json");
+
+fn files() openapi.Files {
+    const service_spec = openapi.json.parse(raw_service);
+    const structure_spec = openapi.json.parse(raw_structure);
+    return .{
+        .items = &.{
+            .{ .name = "service.json", .spec = service_spec },
+            .{ .name = "structure.json", .spec = structure_spec },
         },
-    },
-};
+    };
+}
 
-pub const Models = codegen.models.make(files);
-pub const ClientApi = codegen.client.make(embed, files);
-pub const ServerApi = codegen.server.make(embed, files);
+const ClientApi = codegen.client.make(embed, files());
+const net = @import("net").make(embed);
 ```
 
-这个示例通过 `@import("embed").make(std)` 把生成出来的代码接到普通的 `std` 运行时上。
+若只有一份 OpenAPI JSON，`**.items**` 里放一条即可。
 
-到这里为止，磁盘上依然不会多出任何生成文件。`Models`、`ClientApi`、`ServerApi` 都是编译期生成出来的 Zig 类型，你可以直接从自己的库里 re-export。
+## 调用生成的 client（petstore）
 
-生成出来的 client 会把 transport state 放在 `ClientApi` 里，但你对外暴露的接口完全可以写成 `listPets(ctx, args)` 这种风格。
+完整流程（含 `**ServerApi**`、监听、线程）见 `**tests/examples/petstore/test.zig**`。这里只保留与 **client** 直接相关的写法，均来自该文件。
 
-如果你更喜欢这种写法，可以在自己的模块里很薄地包一层：
+**1. `Transport` + `ClientApi.init`**
 
 ```zig
-const std = @import("std");
-const net = @import("net").make(embed);
+var transport = try net.http.Transport.init(alloc, .{});
+defer transport.deinit();
+var http_client = try net.http.Client.init(alloc, .{
+    .round_tripper = transport.roundTripper(),
+});
+defer http_client.deinit();
 
-pub const ClientContext = struct {
-    api: ClientApi,
+var api = try ClientApi.init(.{
+    .allocator = alloc,
+    .http_client = &http_client,
+    .base_url = base_url,
+});
+defer api.deinit();
+```
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        http_client: *net.http.Client,
-        base_url: []const u8,
-    ) !ClientContext {
-        return .{
-            .api = try ClientApi.init(.{
-                .allocator = allocator,
-                .http_client = http_client,
-                .base_url = base_url,
-            }),
-        };
-    }
+**2. `send` 的第一个参数：`context.Context`**
 
-    pub fn deinit(self: *ClientContext) void {
-        self.api.deinit();
-    }
-};
+示例测试里使用 harness 的 `**t.context()**`。在普通程序里可像 `**tests/oapi-codegen/strict-server/test.zig**` 那样：
 
-pub fn listPets(
-    ctx: *ClientContext,
-    args: ClientApi.operations.listPets.Args,
-) !void {
-    var response = try ctx.api.operations.listPets.send(args);
-    defer ctx.api.operations.listPets.deinitResponse(&response);
+```zig
+var ctx_ns = try @import("context").make(embed).init(alloc);
+defer ctx_ns.deinit();
+const bg = ctx_ns.background();
+// 下面凡示例写 `t.context()` 的地方可换成 `bg`
+```
 
-    switch (response) {
-        .status_200 => |parsed| {
-            _ = parsed;
-        },
-        else => {},
-    }
+**3. 带 JSON body 的 POST（`addPet`）**
+
+```zig
+const resp = try api.operations.addPet.send(t.context(), alloc, .{
+    .body = .{
+        .name = "neo",
+        .photoUrls = &.{"https://example.test/pets/100-a.png"},
+    },
+});
+defer resp.deinit();
+switch (resp.value) {
+    .status_200 => |parsed| {
+        _ = parsed.value.id.?;
+        _ = parsed.value.name;
+    },
+    else => return error.UnexpectedCreateStatus,
 }
 ```
 
-这里的 `listPets` 只是示例 operation 名。实际项目里的 operation 名、参数结构、响应 union、model 类型，都会在 comptime 根据 OpenAPI 文档推导出来。
+**4. 带 path 参数的 GET（`getPetById`）**
+
+OpenAPI 里 `/pet/{petId}` 对应参数名 `**petId`**，代码里写 `**.path = .{ .petId = pet_id }**`。
+
+```zig
+const resp = try api.operations.getPetById.send(t.context(), alloc, .{
+    .path = .{ .petId = pet_id },
+});
+defer resp.deinit();
+switch (resp.value) {
+    .status_200 => |parsed| {
+        _ = parsed.value.name;
+    },
+    else => return error.UnexpectedReadStatus,
+}
+```
+
+**5. 带 path + header 的 DELETE（`deletePet`）**
+
+```zig
+const resp = try api.operations.deletePet.send(t.context(), alloc, .{
+    .path = .{ .petId = pet_id },
+    .header = .{ .api_key = null },
+});
+defer resp.deinit();
+switch (resp.value) {
+    .status_204 => {},
+    else => return error.UnexpectedDeleteStatus,
+}
+```
+
+**响应类型：** `**send`** 返回带 `**.value**` 的句柄，按 HTTP 状态分支（如 `**.status_200**`、`**.status_404**`、`**.status_204**`）。请像示例一样 `**defer resp.deinit()**`。请求/响应体用到的 model 在 `**ClientApi.models**` 上（例如规范里的 `**Pet**` 对应 `**ClientApi.models.Pet**`）。
 
 ## 致谢
 
-这个项目在设计思路和测试覆盖上，明显受到了 [`oapi-codegen`](https://github.com/oapi-codegen/oapi-codegen) 的启发。
-
-- `tests/oapi-codegen` 里的 fixtures 来自上游 `oapi-codegen`
-- 许多兼容性场景和行为预期也参考了上游测试体系
-
-感谢 `oapi-codegen` 的维护者和贡献者，提供了非常好的参考实现与测试语料。
+`**tests/oapi-codegen**` 中的场景与数据源自 **[oapi-codegen](https://github.com/oapi-codegen/oapi-codegen)**。
