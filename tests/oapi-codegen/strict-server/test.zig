@@ -34,6 +34,34 @@ const ServerApi = blk: {
     break :blk codegen.server.make(embed, files);
 };
 
+fn readAllReadCloser(allocator: embed.mem.Allocator, reader: net.http.ReadCloser) ![]u8 {
+    defer reader.close();
+    var list = try embed.ArrayList(u8).initCapacity(allocator, 0);
+    defer list.deinit(allocator);
+    var buf: [1024]u8 = undefined;
+    while (true) {
+        const n = try reader.read(&buf);
+        if (n == 0) break;
+        try list.appendSlice(allocator, buf[0..n]);
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+const FixedBufferBody = struct {
+    bytes: []const u8,
+    offset: usize = 0,
+
+    pub fn read(self: *@This(), buffer: []u8) !usize {
+        const remaining = self.bytes[self.offset..];
+        const amount = @min(buffer.len, remaining.len);
+        @memcpy(buffer[0..amount], remaining[0..amount]);
+        self.offset += amount;
+        return amount;
+    }
+
+    pub fn close(_: *@This()) void {}
+};
+
 fn specRunner() testing.TestRunner {
     const Runner = struct {
         pub fn init(_: *@This(), _: std.mem.Allocator) !void {}
@@ -229,18 +257,20 @@ const Handlers = struct {
 
     fn TextExample(ctx_ptr: *anyopaque, req_ctx: Context, allocator: embed.mem.Allocator, args: ServerApi.operations.TextExample.Args) !ServerApi.operations.TextExample.Response {
         _ = req_ctx;
-        _ = allocator;
         const ctx: *AppContext = @ptrCast(@alignCast(ctx_ptr));
         ctx.raw_call_count += 1;
-        return .{ .status_200 = args.body.? };
+        const reader = args.body orelse return error.MissingBody;
+        const echoed = try readAllReadCloser(allocator, reader);
+        return .{ .status_200 = echoed };
     }
 
     fn UnknownExample(ctx_ptr: *anyopaque, req_ctx: Context, allocator: embed.mem.Allocator, args: ServerApi.operations.UnknownExample.Args) !ServerApi.operations.UnknownExample.Response {
         _ = req_ctx;
-        _ = allocator;
         const ctx: *AppContext = @ptrCast(@alignCast(ctx_ptr));
         ctx.raw_call_count += 1;
-        return .{ .status_200 = args.body.? };
+        const reader = args.body orelse return error.MissingBody;
+        const echoed = try readAllReadCloser(allocator, reader);
+        return .{ .status_200 = echoed };
     }
 };
 
@@ -378,25 +408,99 @@ fn run_generated_client_and_server_exchange_raw_request_and_respons(t: *testing.
     });
     defer api.deinit();
 
+    var text_body = FixedBufferBody{ .bytes = "ping" };
     const text = try api.operations.TextExample.send(bg, std.testing.allocator, .{
-        .body = "ping",
+        .body = net.http.ReadCloser.init(&text_body),
     });
     defer api.operations.TextExample.deinitResponse(text);
     switch (text.value) {
-        .status_200 => |payload| try std.testing.expectEqualStrings("ping", payload),
+        .status_200 => |reader| {
+            var buf: [64]u8 = undefined;
+            var len: usize = 0;
+            while (len < buf.len) {
+                const n = try reader.read(buf[len..]);
+                if (n == 0) break;
+                len += n;
+            }
+            try std.testing.expectEqualStrings("ping", buf[0..len]);
+        },
         else => return error.UnexpectedStatus,
     }
 
+    var unknown_body = FixedBufferBody{ .bytes = "bytes" };
     const unknown = try api.operations.UnknownExample.send(bg, std.testing.allocator, .{
-        .body = "bytes",
+        .body = net.http.ReadCloser.init(&unknown_body),
     });
     defer api.operations.UnknownExample.deinitResponse(unknown);
     switch (unknown.value) {
-        .status_200 => |payload| try std.testing.expectEqualStrings("bytes", payload),
+        .status_200 => |reader| {
+            var buf: [64]u8 = undefined;
+            var len: usize = 0;
+            while (len < buf.len) {
+                const n = try reader.read(buf[len..]);
+                if (n == 0) break;
+                len += n;
+            }
+            try std.testing.expectEqualStrings("bytes", buf[0..len]);
+        },
         else => return error.UnexpectedStatus,
     }
 
     try std.testing.expectEqual(@as(usize, 2), ctx.raw_call_count);
+}
+
+fn run_generated_client_closes_raw_request_stream_on_transport_error(t: *testing.T, allocator: std.mem.Allocator) !void {
+    _ = t;
+    _ = allocator;
+
+    var ctx_ns = try @import("context").make(embed).init(std.testing.allocator);
+    defer ctx_ns.deinit();
+    const bg = ctx_ns.background();
+
+    const CloseTrackingBody = struct {
+        closed: *bool,
+        payload: []const u8 = "boom",
+        offset: usize = 0,
+
+        pub fn read(self: *@This(), buffer: []u8) !usize {
+            const remaining = self.payload[self.offset..];
+            const amount = @min(buffer.len, remaining.len);
+            @memcpy(buffer[0..amount], remaining[0..amount]);
+            self.offset += amount;
+            return amount;
+        }
+
+        pub fn close(self: *@This()) void {
+            self.closed.* = true;
+        }
+    };
+
+    const FailingRoundTripper = struct {
+        pub fn roundTrip(_: *@This(), _: *const net.http.Request) anyerror!net.http.Response {
+            return error.TransportBoom;
+        }
+    };
+
+    var transport = FailingRoundTripper{};
+    var http_client = try net.http.Client.init(std.testing.allocator, .{
+        .round_tripper = net.http.RoundTripper.init(&transport),
+    });
+    defer http_client.deinit();
+
+    var api = try ClientApi.init(.{
+        .allocator = std.testing.allocator,
+        .http_client = &http_client,
+        .base_url = "http://example.test",
+    });
+    defer api.deinit();
+
+    var closed = false;
+    var body = CloseTrackingBody{ .closed = &closed };
+
+    try std.testing.expectError(error.TransportBoom, api.operations.TextExample.send(bg, std.testing.allocator, .{
+        .body = net.http.ReadCloser.init(&body),
+    }));
+    try std.testing.expect(closed);
 }
 
 pub fn TestRunner() testing.TestRunner {
@@ -408,6 +512,7 @@ pub fn TestRunner() testing.TestRunner {
             t.run("parse, roundtrip, and validate structure", specRunner());
             t.run("generated client returns status union responses", testing.TestRunner.fromFn(std, run_generated_client_returns_status_union_responses));
             t.run("generated client and server exchange raw request and respons", testing.TestRunner.fromFn(std, run_generated_client_and_server_exchange_raw_request_and_respons));
+            t.run("generated client closes raw request stream on transport error", testing.TestRunner.fromFn(std, run_generated_client_closes_raw_request_stream_on_transport_error));
             return t.wait();
         }
 

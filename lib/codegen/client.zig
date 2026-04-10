@@ -208,7 +208,7 @@ fn OperationHandle(
         }
         break :blk items;
     };
-    const request_body = selectRequestBody(files, operation_ref.file_name, operation_ref.operation.request_body, operation_ref.field_name);
+    const request_body = selectRequestBody(embed, files, operation_ref.file_name, operation_ref.operation.request_body, operation_ref.field_name);
     const ArgsType = makeArgsType(parameters, request_body);
     const response_variants_slice = collectResponseVariants(files, operation_ref.file_name, operation_ref.operation.responses, operation_ref.field_name);
     const response_variants = blk: {
@@ -236,6 +236,25 @@ fn OperationHandle(
         const SendResult = if (ResponseType == void) void else *ResponseType;
 
         pub fn send(self: Self, ctx: Context, allocator: embed.mem.Allocator, args: ArgsType) anyerror!SendResult {
+            const RawRequestBodyGuard = struct {
+                inner: Http.ReadCloser,
+                closed: bool = false,
+
+                fn init(inner: Http.ReadCloser) @This() {
+                    return .{ .inner = inner };
+                }
+
+                pub fn read(guard: *@This(), buffer: []u8) anyerror!usize {
+                    return guard.inner.read(buffer);
+                }
+
+                pub fn close(guard: *@This()) void {
+                    if (guard.closed) return;
+                    guard.closed = true;
+                    guard.inner.close();
+                }
+            };
+
             var url_builder = try embed.ArrayList(u8).initCapacity(allocator, 0);
             defer url_builder.deinit(allocator);
 
@@ -276,18 +295,43 @@ fn OperationHandle(
 
             var body_bytes: ?[]u8 = null;
             defer if (body_bytes) |owned| allocator.free(owned);
+            var raw_request_body_guard: RawRequestBodyGuard = undefined;
+            var has_raw_request_body_guard = false;
+            errdefer if (has_raw_request_body_guard) raw_request_body_guard.close();
 
             if (request_body) |selected_body| {
                 if (@hasField(ArgsType, "body")) {
                     const body_value = @field(args, "body");
-                    switch (@typeInfo(@TypeOf(body_value))) {
-                        .optional => {
-                            if (body_value) |payload| {
-                                body_bytes = try encodeRequestBody(embed, allocator, payload, selected_body.payload_kind);
+                    switch (selected_body.payload_kind) {
+                        .json => {
+                            switch (@typeInfo(@TypeOf(body_value))) {
+                                .optional => {
+                                    if (body_value) |payload| {
+                                        body_bytes = try encodeJsonBody(embed, allocator, payload);
+                                    }
+                                },
+                                else => {
+                                    body_bytes = try encodeJsonBody(embed, allocator, body_value);
+                                },
                             }
                         },
-                        else => {
-                            body_bytes = try encodeRequestBody(embed, allocator, body_value, selected_body.payload_kind);
+                        .raw => {
+                            switch (@typeInfo(@TypeOf(body_value))) {
+                                .optional => {
+                                    if (body_value) |rc| {
+                                        raw_request_body_guard = RawRequestBodyGuard.init(rc);
+                                        has_raw_request_body_guard = true;
+                                        request = request.withBody(Http.ReadCloser.init(&raw_request_body_guard));
+                                        try request.addHeader(Http.Header.content_type, selected_body.content_type);
+                                    }
+                                },
+                                else => {
+                                    raw_request_body_guard = RawRequestBodyGuard.init(body_value);
+                                    has_raw_request_body_guard = true;
+                                    request = request.withBody(Http.ReadCloser.init(&raw_request_body_guard));
+                                    try request.addHeader(Http.Header.content_type, selected_body.content_type);
+                                },
+                            }
                         },
                     }
                 }
@@ -304,20 +348,27 @@ fn OperationHandle(
                 try request.addHeader(Http.Header.accept, "application/json");
             }
 
-            var response = try self.state.http_client.do(&request);
-            defer response.deinit();
+            const response_ptr = try self.state.allocator.create(Http.Response);
+            errdefer self.state.allocator.destroy(response_ptr);
+            response_ptr.* = try self.state.http_client.do(&request);
+            var dispose_http_response: bool = true;
+            errdefer if (dispose_http_response) response_ptr.deinit();
 
             inline for (response_variants) |variant| {
                 if (variant.status_code) |status_code| {
-                    if (response.status_code == status_code) {
-                        return try decodeResponseVariant(embed, ResponseType, allocator, response, variant);
+                    if (response_ptr.status_code == status_code) {
+                        const out = try decodeResponseVariant(embed, ResponseType, allocator, response_ptr, variant);
+                        dispose_http_response = false;
+                        return out;
                     }
                 }
             }
 
             inline for (response_variants) |variant| {
                 if (variant.status_code == null) {
-                    return try decodeResponseVariant(embed, ResponseType, allocator, response, variant);
+                    const out = try decodeResponseVariant(embed, ResponseType, allocator, response_ptr, variant);
+                    dispose_http_response = false;
+                    return out;
                 }
             }
 
@@ -337,11 +388,18 @@ fn makeOwnedResponseType(comptime embed: type, comptime ResponsePayload: type, c
 
     return struct {
         allocator: embed.mem.Allocator,
+        /// Heap `Response` from `Client.do`; kept alive until the body `ReadCloser` is finished (streaming raw).
+        http_response: *@import("net").make(embed).http.Response,
         value: ResponsePayload,
+        /// If a raw response has no body reader, `ReadCloser` points here (streaming, not buffered whole).
+        raw_empty_body: FixedBufferBody = .{ .bytes = "" },
 
         const Self = @This();
 
         pub fn deinit(self: *Self) void {
+            const allocator = self.allocator;
+            const resp_ptr = self.http_response;
+
             switch (self.value) {
                 inline else => |*payload, tag| {
                     inline for (variants) |variant| {
@@ -349,13 +407,14 @@ fn makeOwnedResponseType(comptime embed: type, comptime ResponsePayload: type, c
                         switch (variant.payload_kind) {
                             .none => {},
                             .json => payload.deinit(),
-                            .raw => self.allocator.free(payload.*),
+                            .raw => payload.*.close(),
                         }
                     }
                 },
             }
 
-            const allocator = self.allocator;
+            resp_ptr.deinit();
+            allocator.destroy(resp_ptr);
             self.* = undefined;
             allocator.destroy(self);
         }
@@ -751,11 +810,13 @@ fn selectParameterSchema(comptime parameter: Spec.Parameter) ?struct {
 }
 
 fn selectRequestBody(
+    comptime embed: type,
     comptime files: Files,
     comptime current_file_name: []const u8,
     comptime request_body_or_ref: ?Spec.RequestBodyOrRef,
     comptime context_name: []const u8,
 ) ?SelectedRequestBody {
+    const Http = @import("net").make(embed).http;
     const request_body = request_body_or_ref orelse return null;
     const resolved = resolveRequestBodyOrRef(files, current_file_name, request_body);
 
@@ -777,7 +838,7 @@ fn selectRequestBody(
 
         return .{
             .required = resolved.request_body.required,
-            .body_type = []const u8,
+            .body_type = Http.ReadCloser,
             .payload_kind = .raw,
             .content_type = copyString(entry.name),
         };
@@ -851,6 +912,8 @@ fn responseVariant(
 fn makeResponseType(comptime embed: type, comptime variants: anytype) type {
     if (variants.len == 0) return void;
 
+    const Http = @import("net").make(embed).http;
+
     var enum_fields: [variants.len]Type.EnumField = undefined;
     var union_fields: [variants.len]Type.UnionField = undefined;
 
@@ -858,7 +921,7 @@ fn makeResponseType(comptime embed: type, comptime variants: anytype) type {
         const payload_type = switch (variant.payload_kind) {
             .none => void,
             .json => embed.json.Parsed(variant.payload_type),
-            .raw => []u8,
+            .raw => Http.ReadCloser,
         };
         ensureUniqueResponseVariantName(variants[0..index], variant.field_name, variant.status_name);
 
@@ -1153,18 +1216,6 @@ fn serializeScalar(comptime embed: type, allocator: embed.mem.Allocator, value: 
     };
 }
 
-fn encodeRequestBody(
-    comptime embed: type,
-    allocator: embed.mem.Allocator,
-    value: anytype,
-    comptime payload_kind: RequestPayloadKind,
-) ![]u8 {
-    return switch (payload_kind) {
-        .json => encodeJsonBody(embed, allocator, value),
-        .raw => try allocator.dupe(u8, value),
-    };
-}
-
 fn HttpHeaderCookieName() []const u8 {
     return "Cookie";
 }
@@ -1173,7 +1224,7 @@ fn encodeJsonBody(comptime embed: type, allocator: embed.mem.Allocator, value: a
     return try embed.fmt.allocPrint(allocator, "{f}", .{embed.json.fmt(value, .{})});
 }
 
-fn readResponseBody(comptime embed: type, allocator: embed.mem.Allocator, response: anytype) ![]u8 {
+fn readResponseBody(comptime embed: type, allocator: embed.mem.Allocator, response: *const @import("net").make(embed).http.Response) ![]u8 {
     var body = response.body() orelse return try allocator.alloc(u8, 0);
     var list = try embed.ArrayList(u8).initCapacity(allocator, 0);
     defer list.deinit(allocator);
@@ -1192,32 +1243,54 @@ fn decodeResponseVariant(
     comptime embed: type,
     comptime ResponseType: type,
     allocator: embed.mem.Allocator,
-    response: anytype,
+    response: *@import("net").make(embed).http.Response,
     comptime variant: ResponseVariant,
 ) !if (ResponseType == void) void else *ResponseType {
     if (ResponseType == void) return;
 
+    const Http = @import("net").make(embed).http;
     const PayloadType = @FieldType(ResponseType, "value");
-    const response_value = switch (variant.payload_kind) {
-        .none => @unionInit(PayloadType, variant.field_name, {}),
-        .raw => @unionInit(PayloadType, variant.field_name, try readResponseBody(embed, allocator, response)),
-        .json => blk: {
+
+    switch (variant.payload_kind) {
+        .none => {
+            const owned = try allocator.create(ResponseType);
+            owned.* = .{
+                .allocator = allocator,
+                .http_response = response,
+                .value = @unionInit(PayloadType, variant.field_name, {}),
+                .raw_empty_body = .{ .bytes = "" },
+            };
+            return owned;
+        },
+        .raw => {
+            const owned = try allocator.create(ResponseType);
+            owned.allocator = allocator;
+            owned.http_response = response;
+            owned.raw_empty_body = .{ .bytes = "" };
+            const br = if (response.body()) |b| steal: {
+                response.body_reader = null;
+                break :steal b;
+            } else Http.ReadCloser.init(&owned.raw_empty_body);
+            owned.value = @unionInit(PayloadType, variant.field_name, br);
+            return owned;
+        },
+        .json => {
             const response_bytes = try readResponseBody(embed, allocator, response);
             defer allocator.free(response_bytes);
 
             const parsed = try embed.json.parseFromSlice(variant.payload_type, allocator, response_bytes, .{
                 .allocate = .alloc_always,
             });
-            break :blk @unionInit(PayloadType, variant.field_name, parsed);
+            const owned = try allocator.create(ResponseType);
+            owned.* = .{
+                .allocator = allocator,
+                .http_response = response,
+                .value = @unionInit(PayloadType, variant.field_name, parsed),
+                .raw_empty_body = .{ .bytes = "" },
+            };
+            return owned;
         },
-    };
-
-    const owned = try allocator.create(ResponseType);
-    owned.* = .{
-        .allocator = allocator,
-        .value = response_value,
-    };
-    return owned;
+    }
 }
 
 fn responseWantsJson(comptime variants: anytype) bool {

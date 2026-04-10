@@ -195,7 +195,9 @@ switch (resp.value) {
 }
 ```
 
-**Response shape:** `send` returns a pointer-like handle with a `**.value`** union keyed by status (e.g. `.status_200`, `.status_404`, `.status_204`). Always `**defer resp.deinit()**` (as in the example). Model types for bodies live on `**ClientApi.models**` (e.g. `**ClientApi.models.Pet**` where the spec defines `Pet`).
+**Body types:** JSON requests still use typed Zig values on `.body`. For **non-JSON request bodies** (`text/plain`, `application/octet-stream`, etc.), pass a **`net.http.ReadCloser`** on `.body` so the client can upload as a stream; on the server side, raw handlers receive that same `ReadCloser` and should `read` it incrementally, then `close` it when done.
+
+**Response shape:** `send` returns a pointer-like handle with a `.value` union keyed by status (e.g. `.status_200`, `.status_404`, `.status_204`). Always `defer resp.deinit()` after you are done (as in the example). JSON arms hold parsed models; **non-JSON bodies** (`text/plain`, `application/octet-stream`, etc.) are a **`net.http.ReadCloser`**: call `read` in a loop to stream (e.g. to a file), then `defer resp.deinit()` still releases the underlying HTTP response and connection state. Model types for JSON bodies live on `ClientApi.models`.
 
 ## Acknowledgements
 

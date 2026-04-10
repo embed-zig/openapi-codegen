@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-面向 Zig 的 **comptime OpenAPI 3.x** 方案：在编译期解析文档，通过 `**codegen.models`**、`**codegen.client**`、`**codegen.server**` 生成类型与操作入口，**不会**单独落盘 `generated.zig`——生成结果在类型系统里。
+面向 Zig 的 **comptime OpenAPI 3.x** 方案：在编译期解析文档，通过 `**codegen.models**`、`**codegen.client**`、`**codegen.server**` 生成类型与操作入口，**不会**单独落盘 `generated.zig`——生成结果在类型系统里。
 
 ## 环境要求
 
@@ -14,7 +14,7 @@
 
 | 模块                               | 作用                                                                                           |
 | -------------------------------- | -------------------------------------------------------------------------------------------- |
-| `**openapi`**（`lib/openapi.zig`） | JSON → `Spec`；`**Files**` 挂载多文档，支持跨文件 `**$ref**`                                             |
+| `**openapi**`（`lib/openapi.zig`） | JSON → `Spec`；`**Files**` 挂载多文档，支持跨文件 `**$ref**`                                             |
 | `**codegen.models**`             | `**codegen.models.make(files)**` → schema 对应 model 类型                                        |
 | `**codegen.client**`             | `**codegen.client.make(embed, files)**` → `**ClientApi**`，操作为 `**operations.<operationId>**` |
 | `**codegen.server**`             | `**codegen.server.make(embed, files)**` → 严格 handler 注册                                      |
@@ -80,7 +80,7 @@ pub fn build(b: *std.Build) void {
 
 ## Spec + `ClientApi`（与 petstore 示例一致）
 
-本仓库 `**tests/examples/petstore/test.zig**` 使用 **双文件**：`**service.json`** 管 paths，`**structure.json**` 管 `**components**`；`**openapi.Files**` 里两份都要列出。下面片段与示例文件一致（节选）。
+本仓库 `**tests/examples/petstore/test.zig**` 使用 **双文件**：`**service.json**` 管 paths，`**structure.json**` 管 `**components**`；`**openapi.Files**` 里两份都要列出。下面片段与示例文件一致（节选）。
 
 ```zig
 const openapi = @import("openapi");
@@ -162,7 +162,7 @@ switch (resp.value) {
 
 **4. 带 path 参数的 GET（`getPetById`）**
 
-OpenAPI 里 `/pet/{petId}` 对应参数名 `**petId`**，代码里写 `**.path = .{ .petId = pet_id }**`。
+OpenAPI 里 `/pet/{petId}` 对应参数名 `**petId**`，代码里写 `**.path = .{ .petId = pet_id }**`。
 
 ```zig
 const resp = try api.operations.getPetById.send(t.context(), alloc, .{
@@ -191,7 +191,9 @@ switch (resp.value) {
 }
 ```
 
-**响应类型：** `**send`** 返回带 `**.value**` 的句柄，按 HTTP 状态分支（如 `**.status_200**`、`**.status_404**`、`**.status_204**`）。请像示例一样 `**defer resp.deinit()**`。请求/响应体用到的 model 在 `**ClientApi.models**` 上（例如规范里的 `**Pet**` 对应 `**ClientApi.models.Pet**`）。
+**请求体类型：** JSON 请求仍然直接传类型化的 `.body`。对于 **非 JSON 请求体**（`text/plain`、`application/octet-stream` 等），`.body` 需要传 **`net.http.ReadCloser`**，这样 client 会按流式上传；server 侧 raw handler 收到的也是这个 `ReadCloser`，应按需循环 `read`，并在完成后 `close`。
+
+**响应类型：** `send` 返回带 `.value` 的句柄，按 HTTP 状态分支。用完后照常 `defer resp.deinit()`。**JSON** 分支是解析后的 model；**非 JSON**（`text/plain`、`application/octet-stream` 等）分支是 **`net.http.ReadCloser`**：可循环 `read` 做流式读取（例如写入文件），再由 `deinit` 关闭 body 并释放底层 `http.Response`。JSON model 在 `ClientApi.models` 上。
 
 ## 致谢
 

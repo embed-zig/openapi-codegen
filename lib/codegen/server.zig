@@ -267,7 +267,7 @@ fn OperationType(
         }
         break :blk items;
     };
-    const request_body = selectRequestBody(files, operation_ref.file_name, operation_ref.operation.request_body, operation_ref.field_name);
+    const request_body = selectRequestBody(embed, files, operation_ref.file_name, operation_ref.operation.request_body, operation_ref.field_name);
     const response_variants_slice = collectResponseVariants(files, operation_ref.file_name, operation_ref.operation.responses, operation_ref.field_name);
     const response_variants = blk: {
         var items: [response_variants_slice.len]ResponseVariant = undefined;
@@ -283,6 +283,7 @@ fn OperationType(
     return struct {
         pub const Args = ArgsType;
         pub const Response = ResponseType;
+        /// `allocator` is a request-scoped arena (reset after the response is written). Raw request bodies are `http.ReadCloser`; handlers must read and `close` them.
         pub const Handler = *const fn (ptr: *anyopaque, ctx: Context, allocator: embed.mem.Allocator, args: ArgsType) anyerror!ResponseType;
 
         pub fn matches(req: *Http.Request) bool {
@@ -307,33 +308,42 @@ fn OperationType(
             const temp_allocator = temp_arena.allocator();
 
             if (request_body) |body| {
-                if (req.body()) |reader| {
-                    const body_bytes = readBody(embed, temp_allocator, reader) catch {
-                        writePlainStatus(rw, Http.status.bad_request, "Bad Request") catch {};
-                        return;
-                    };
-                    switch (body.payload_kind) {
-                        .json => {
+                switch (body.payload_kind) {
+                    .json => {
+                        if (req.body()) |reader| {
+                            const body_bytes = readBody(embed, temp_allocator, reader) catch {
+                                writePlainStatus(rw, Http.status.bad_request, "Bad Request") catch {};
+                                return;
+                            };
                             const parsed = std.json.parseFromSliceLeaky(body.body_type, temp_allocator, body_bytes, .{}) catch {
                                 writePlainStatus(rw, Http.status.bad_request, "Bad Request") catch {};
                                 return;
                             };
                             @field(args, "body") = parsed;
-                        },
-                        .raw => {
-                            @field(args, "body") = body_bytes;
-                        },
-                    }
-                } else {
-                    if (body.required) {
-                        writePlainStatus(rw, Http.status.bad_request, "Bad Request") catch {};
-                        return;
-                    }
-                    @field(args, "body") = null;
+                        } else {
+                            if (body.required) {
+                                writePlainStatus(rw, Http.status.bad_request, "Bad Request") catch {};
+                                return;
+                            }
+                            @field(args, "body") = null;
+                        }
+                    },
+                    .raw => {
+                        if (req.body_reader) |stolen| {
+                            req.body_reader = null;
+                            @field(args, "body") = stolen;
+                        } else {
+                            if (body.required) {
+                                writePlainStatus(rw, Http.status.bad_request, "Bad Request") catch {};
+                                return;
+                            }
+                            @field(args, "body") = null;
+                        }
+                    },
                 }
             }
 
-            const response_value = handler(shared.ctx, request_ctx, shared.allocator, args) catch {
+            const response_value = handler(shared.ctx, request_ctx, temp_allocator, args) catch {
                 writePlainStatus(rw, Http.status.internal_server_error, "Internal Server Error") catch {};
                 return;
             };
@@ -755,11 +765,13 @@ fn selectParameterSchema(comptime parameter: Spec.Parameter) ?struct {
 }
 
 fn selectRequestBody(
+    comptime embed: type,
     comptime files: Files,
     comptime current_file_name: []const u8,
     comptime request_body_or_ref: ?Spec.RequestBodyOrRef,
     comptime context_name: []const u8,
 ) ?SelectedRequestBody {
+    const Http = @import("net").make(embed).http;
     const request_body = request_body_or_ref orelse return null;
     const resolved = resolveRequestBodyOrRef(files, current_file_name, request_body);
 
@@ -781,7 +793,7 @@ fn selectRequestBody(
 
         return .{
             .required = resolved.request_body.required,
-            .body_type = []const u8,
+            .body_type = Http.ReadCloser,
             .payload_kind = .raw,
             .content_type = copyString(entry.name),
         };
