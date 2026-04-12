@@ -74,6 +74,7 @@ const ResponsePayloadKind = enum {
     none,
     json,
     raw,
+    sse,
 };
 
 const ResponseVariant = struct {
@@ -375,6 +376,8 @@ fn OperationHandle(
             return error.UnexpectedStatusCode;
         }
 
+        /// Releases only the outer response handle. For streaming payloads, callers
+        /// must close the inner `ReadCloser` / `sse.Reader` first.
         pub fn deinitResponse(self: Self, response_value: if (ResponseType == void) void else *ResponseType) void {
             if (ResponseType == void) return;
             _ = self;
@@ -388,14 +391,16 @@ fn makeOwnedResponseType(comptime embed: type, comptime ResponsePayload: type, c
 
     return struct {
         allocator: embed.mem.Allocator,
-        /// Heap `Response` from `Client.do`; kept alive until the body `ReadCloser` is finished (streaming raw).
+        /// Heap `Response` from `Client.do`; kept alive until caller-owned stream teardown finishes.
         http_response: *@import("net").make(embed).http.Response,
         value: ResponsePayload,
-        /// If a raw response has no body reader, `ReadCloser` points here (streaming, not buffered whole).
+        /// If a raw or SSE response has no body reader, the caller-owned stream points here.
         raw_empty_body: FixedBufferBody = .{ .bytes = "" },
 
         const Self = @This();
 
+        /// Releases the outer HTTP response and wrapper allocation. `.raw` and `.sse`
+        /// payload cleanup is caller-owned and must happen before this method.
         pub fn deinit(self: *Self) void {
             const allocator = self.allocator;
             const resp_ptr = self.http_response;
@@ -407,7 +412,7 @@ fn makeOwnedResponseType(comptime embed: type, comptime ResponsePayload: type, c
                         switch (variant.payload_kind) {
                             .none => {},
                             .json => payload.deinit(),
-                            .raw => payload.*.close(),
+                            .raw, .sse => {},
                         }
                     }
                 },
@@ -890,6 +895,18 @@ fn responseVariant(
         };
     }
 
+    inline for (response.content) |entry| {
+        if (isSseContentType(entry.name)) {
+            return .{
+                .field_name = responseVariantFieldName(status_name, index),
+                .status_name = copyString(status_name),
+                .status_code = parseStatusCode(status_name),
+                .payload_kind = .sse,
+                .payload_type = void,
+            };
+        }
+    }
+
     if (response.content.len != 0) {
         return .{
             .field_name = responseVariantFieldName(status_name, index),
@@ -913,6 +930,7 @@ fn makeResponseType(comptime embed: type, comptime variants: anytype) type {
     if (variants.len == 0) return void;
 
     const Http = @import("net").make(embed).http;
+    const Sse = @import("../sse.zig").make(embed);
 
     var enum_fields: [variants.len]Type.EnumField = undefined;
     var union_fields: [variants.len]Type.UnionField = undefined;
@@ -922,6 +940,7 @@ fn makeResponseType(comptime embed: type, comptime variants: anytype) type {
             .none => void,
             .json => embed.json.Parsed(variant.payload_type),
             .raw => Http.ReadCloser,
+            .sse => Sse.Reader,
         };
         ensureUniqueResponseVariantName(variants[0..index], variant.field_name, variant.status_name);
 
@@ -1249,6 +1268,7 @@ fn decodeResponseVariant(
     if (ResponseType == void) return;
 
     const Http = @import("net").make(embed).http;
+    const Sse = @import("../sse.zig").make(embed);
     const PayloadType = @FieldType(ResponseType, "value");
 
     switch (variant.payload_kind) {
@@ -1272,6 +1292,18 @@ fn decodeResponseVariant(
                 break :steal b;
             } else Http.ReadCloser.init(&owned.raw_empty_body);
             owned.value = @unionInit(PayloadType, variant.field_name, br);
+            return owned;
+        },
+        .sse => {
+            const owned = try allocator.create(ResponseType);
+            owned.allocator = allocator;
+            owned.http_response = response;
+            owned.raw_empty_body = .{ .bytes = "" };
+            const br = if (response.body()) |b| steal: {
+                response.body_reader = null;
+                break :steal b;
+            } else Http.ReadCloser.init(&owned.raw_empty_body);
+            owned.value = @unionInit(PayloadType, variant.field_name, Sse.Reader.init(allocator, br));
             return owned;
         },
         .json => {
@@ -1315,7 +1347,19 @@ fn isSuccessResponseName(comptime name: []const u8) bool {
 }
 
 fn isJsonContentType(comptime name: []const u8) bool {
-    return std.mem.eql(u8, name, "application/json") or std.mem.endsWith(u8, name, "+json");
+    const base = mediaTypeBase(name);
+    return std.ascii.eqlIgnoreCase(base, "application/json") or
+        std.ascii.eqlIgnoreCase(base, "text/json") or
+        (base.len >= 5 and std.ascii.eqlIgnoreCase(base[base.len - 5 ..], "+json"));
+}
+
+fn isSseContentType(comptime name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(mediaTypeBase(name), "text/event-stream");
+}
+
+fn mediaTypeBase(comptime name: []const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, name, ';') orelse name.len;
+    return std.mem.trim(u8, name[0..end], " \t");
 }
 
 fn deriveOperationName(comptime method: []const u8, comptime path: []const u8) []const u8 {

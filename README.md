@@ -25,8 +25,9 @@ The `**embed**` argument you pass in is the “std-like” namespace generated c
 ## Clone and verify
 
 ```sh
-zig build test     # oapi-codegen fixture suite under tests/oapi-codegen/
-zig build example # runs tests/examples/ (petstore integration)
+zig build unit    # runtime/unit coverage (including SSE flush + ownership regressions)
+zig build example # runs tests/examples/ (petstore, stream, sse)
+zig build test    # runs unit + example + tests/oapi-codegen/ fixture suites
 ```
 
 ## Depend on the package
@@ -197,7 +198,7 @@ switch (resp.value) {
 
 **Body types:** JSON requests still use typed Zig values on `.body`. For **non-JSON request bodies** (`text/plain`, `application/octet-stream`, etc.), pass a **`net.http.ReadCloser`** on `.body` so the client can upload as a stream; on the server side, raw handlers receive that same `ReadCloser` and should `read` it incrementally, then `close` it when done.
 
-**Response shape:** `send` returns a pointer-like handle with a `.value` union keyed by status (e.g. `.status_200`, `.status_404`, `.status_204`). Always `defer resp.deinit()` after you are done (as in the example). JSON arms hold parsed models; **non-JSON bodies** (`text/plain`, `application/octet-stream`, etc.) are a **`net.http.ReadCloser`**: call `read` in a loop to stream (e.g. to a file), then `defer resp.deinit()` still releases the underlying HTTP response and connection state. Model types for JSON bodies live on `ClientApi.models`.
+**Response shape:** `send` returns a pointer-like handle with a `.value` union keyed by status (e.g. `.status_200`, `.status_404`, `.status_204`). Always `defer resp.deinit()` after you are done. JSON arms hold parsed models and are still released by the outer response handle. **Non-JSON stream bodies** (`text/plain`, `application/octet-stream`, etc.) are a **`net.http.ReadCloser`**: call `read` in a loop, then `close()` that reader yourself before the outer `resp.deinit()`. `text/event-stream` responses return `codegen.sse.Reader`: consume events, then call `stream.deinit()` before the outer `resp.deinit()`. Model types for JSON bodies live on `ClientApi.models`.
 
 ## Acknowledgements
 

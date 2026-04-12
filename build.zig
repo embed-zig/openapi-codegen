@@ -54,6 +54,24 @@ pub fn build(b: *std.Build) void {
     });
     const run_oapi_codegen_fixtures_tests = b.addRunArtifact(oapi_codegen_fixtures_tests);
 
+    const unit_tests_mod = b.createModule(.{
+        .root_source_file = b.path("tests/sse_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "embed_std", .module = embed_std_mod },
+            .{ .name = "net", .module = net_mod },
+            .{ .name = "openapi", .module = openapi_mod },
+            .{ .name = "codegen", .module = codegen_mod },
+            .{ .name = "context", .module = context_mod },
+            .{ .name = "testing", .module = embed_testing_mod },
+        },
+    });
+    const unit_tests = b.addTest(.{
+        .root_module = unit_tests_mod,
+    });
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+
     const examples_mod = b.createModule(.{
         .root_source_file = b.path("tests/examples.zig"),
         .target = target,
@@ -73,9 +91,35 @@ pub fn build(b: *std.Build) void {
     });
     const run_examples_tests = b.addRunArtifact(examples_tests);
 
-    const test_step = b.step("test", "Run oapi-codegen fixture tests");
+    const stream_tests_mod = b.createModule(.{
+        .root_source_file = b.path("tests/stream_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "openapi", .module = openapi_mod },
+            .{ .name = "codegen", .module = codegen_mod },
+            .{ .name = "embed", .module = embed_mod },
+            .{ .name = "embed_std", .module = embed_std_mod },
+            .{ .name = "net", .module = net_mod },
+            .{ .name = "context", .module = context_mod },
+            .{ .name = "testing", .module = embed_testing_mod },
+        },
+    });
+    const stream_tests = b.addTest(.{
+        .root_module = stream_tests_mod,
+    });
+    const run_stream_tests = b.addRunArtifact(stream_tests);
+
+    const test_step = b.step("test", "Run repository tests");
+    test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_examples_tests.step);
+    test_step.dependOn(&run_stream_tests.step);
     test_step.dependOn(&run_oapi_codegen_fixtures_tests.step);
+
+    const unit_step = b.step("unit", "Run unit tests");
+    unit_step.dependOn(&run_unit_tests.step);
 
     const example_step = b.step("example", "Run example tests (e.g. petstore integration)");
     example_step.dependOn(&run_examples_tests.step);
+    example_step.dependOn(&run_stream_tests.step);
 }

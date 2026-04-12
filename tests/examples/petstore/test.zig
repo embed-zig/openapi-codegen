@@ -29,9 +29,8 @@ const net = @import("net").make(embed);
 
 const pet_id: i64 = 100;
 
-pub fn TestRunner(comptime lib: type) testing_api.TestRunner {
-    _ = lib;
-    return testing_api.TestRunner.fromFn(embed, runPetstoreExample);
+pub fn TestRunner() testing_api.TestRunner {
+    return testing_api.TestRunner.fromFn(embed, 1024 * 1024, runPetstoreExample);
 }
 
 fn runPetstoreExample(t: *testing_api.T, alloc: embed.mem.Allocator) !void {

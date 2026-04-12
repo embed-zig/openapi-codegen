@@ -184,6 +184,6 @@ fn run_zig_semantic_equivalent_for_strict_framework_response_handli(t: *testing.
 pub fn TestRunner(comptime phase: Phase) testing.TestRunner {
     return switch (phase) {
         .spec => specRunner(),
-        .strict_framework => testing.TestRunner.fromFn(std, run_zig_semantic_equivalent_for_strict_framework_response_handli),
+        .strict_framework => testing.TestRunner.fromFn(std, 1024 * 1024, run_zig_semantic_equivalent_for_strict_framework_response_handli),
     };
 }

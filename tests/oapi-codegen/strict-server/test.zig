@@ -315,13 +315,12 @@ fn startServer(server: *ServerApi) !ServerRun {
 
 fn run_generated_client_returns_status_union_responses(t: *testing.T, allocator: std.mem.Allocator) !void {
     _ = t;
-    _ = allocator;
-    var ctx_ns = try @import("context").make(embed).init(std.testing.allocator);
+    var ctx_ns = try @import("context").make(embed).init(allocator);
     defer ctx_ns.deinit();
     const bg = ctx_ns.background();
 
     var ctx = AppContext{};
-    var server = try ServerApi.init(std.testing.allocator, &ctx, .{
+    var server = try ServerApi.init(allocator, &ctx, .{
         .JSONExample = Handlers.JSONExample,
         .TextExample = Handlers.TextExample,
         .UnknownExample = Handlers.UnknownExample,
@@ -331,24 +330,24 @@ fn run_generated_client_returns_status_union_responses(t: *testing.T, allocator:
     var run_inner = try startServer(&server);
     defer run_inner.stop(&server) catch {};
 
-    const base_url = try embed.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}", .{run_inner.port});
-    defer std.testing.allocator.free(base_url);
+    const base_url = try embed.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{run_inner.port});
+    defer allocator.free(base_url);
 
-    var transport = try net.http.Transport.init(std.testing.allocator, .{});
+    var transport = try net.http.Transport.init(allocator, .{});
     defer transport.deinit();
-    var http_client = try net.http.Client.init(std.testing.allocator, .{
+    var http_client = try net.http.Client.init(allocator, .{
         .round_tripper = transport.roundTripper(),
     });
     defer http_client.deinit();
 
     var api = try ClientApi.init(.{
-        .allocator = std.testing.allocator,
+        .allocator = allocator,
         .http_client = &http_client,
         .base_url = base_url,
     });
     defer api.deinit();
 
-    const ok = try api.operations.JSONExample.send(bg, std.testing.allocator, .{
+    const ok = try api.operations.JSONExample.send(bg, allocator, .{
         .body = ClientApi.models.example{
             .value = "hello",
         },
@@ -359,7 +358,7 @@ fn run_generated_client_returns_status_union_responses(t: *testing.T, allocator:
         else => return error.UnexpectedStatus,
     }
 
-    const bad_request = try api.operations.JSONExample.send(bg, std.testing.allocator, .{
+    const bad_request = try api.operations.JSONExample.send(bg, allocator, .{
         .body = ClientApi.models.example{
             .value = "boom",
         },
@@ -373,15 +372,14 @@ fn run_generated_client_returns_status_union_responses(t: *testing.T, allocator:
     try std.testing.expectEqual(@as(usize, 2), ctx.call_count);
 }
 
-fn run_generated_client_and_server_exchange_raw_request_and_respons(t: *testing.T, allocator: std.mem.Allocator) !void {
+fn run_generated_client_and_server_exchange_raw_request_and_response(t: *testing.T, allocator: std.mem.Allocator) !void {
     _ = t;
-    _ = allocator;
-    var ctx_ns = try @import("context").make(embed).init(std.testing.allocator);
+    var ctx_ns = try @import("context").make(embed).init(allocator);
     defer ctx_ns.deinit();
     const bg = ctx_ns.background();
 
     var ctx = AppContext{};
-    var server = try ServerApi.init(std.testing.allocator, &ctx, .{
+    var server = try ServerApi.init(allocator, &ctx, .{
         .JSONExample = Handlers.JSONExample,
         .TextExample = Handlers.TextExample,
         .UnknownExample = Handlers.UnknownExample,
@@ -391,30 +389,31 @@ fn run_generated_client_and_server_exchange_raw_request_and_respons(t: *testing.
     var run_inner = try startServer(&server);
     defer run_inner.stop(&server) catch {};
 
-    const base_url = try embed.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}", .{run_inner.port});
-    defer std.testing.allocator.free(base_url);
+    const base_url = try embed.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{run_inner.port});
+    defer allocator.free(base_url);
 
-    var transport = try net.http.Transport.init(std.testing.allocator, .{});
+    var transport = try net.http.Transport.init(allocator, .{});
     defer transport.deinit();
-    var http_client = try net.http.Client.init(std.testing.allocator, .{
+    var http_client = try net.http.Client.init(allocator, .{
         .round_tripper = transport.roundTripper(),
     });
     defer http_client.deinit();
 
     var api = try ClientApi.init(.{
-        .allocator = std.testing.allocator,
+        .allocator = allocator,
         .http_client = &http_client,
         .base_url = base_url,
     });
     defer api.deinit();
 
     var text_body = FixedBufferBody{ .bytes = "ping" };
-    const text = try api.operations.TextExample.send(bg, std.testing.allocator, .{
+    const text = try api.operations.TextExample.send(bg, allocator, .{
         .body = net.http.ReadCloser.init(&text_body),
     });
     defer api.operations.TextExample.deinitResponse(text);
     switch (text.value) {
         .status_200 => |reader| {
+            defer reader.close();
             var buf: [64]u8 = undefined;
             var len: usize = 0;
             while (len < buf.len) {
@@ -428,12 +427,13 @@ fn run_generated_client_and_server_exchange_raw_request_and_respons(t: *testing.
     }
 
     var unknown_body = FixedBufferBody{ .bytes = "bytes" };
-    const unknown = try api.operations.UnknownExample.send(bg, std.testing.allocator, .{
+    const unknown = try api.operations.UnknownExample.send(bg, allocator, .{
         .body = net.http.ReadCloser.init(&unknown_body),
     });
     defer api.operations.UnknownExample.deinitResponse(unknown);
     switch (unknown.value) {
         .status_200 => |reader| {
+            defer reader.close();
             var buf: [64]u8 = undefined;
             var len: usize = 0;
             while (len < buf.len) {
@@ -451,9 +451,7 @@ fn run_generated_client_and_server_exchange_raw_request_and_respons(t: *testing.
 
 fn run_generated_client_closes_raw_request_stream_on_transport_error(t: *testing.T, allocator: std.mem.Allocator) !void {
     _ = t;
-    _ = allocator;
-
-    var ctx_ns = try @import("context").make(embed).init(std.testing.allocator);
+    var ctx_ns = try @import("context").make(embed).init(allocator);
     defer ctx_ns.deinit();
     const bg = ctx_ns.background();
 
@@ -482,13 +480,13 @@ fn run_generated_client_closes_raw_request_stream_on_transport_error(t: *testing
     };
 
     var transport = FailingRoundTripper{};
-    var http_client = try net.http.Client.init(std.testing.allocator, .{
+    var http_client = try net.http.Client.init(allocator, .{
         .round_tripper = net.http.RoundTripper.init(&transport),
     });
     defer http_client.deinit();
 
     var api = try ClientApi.init(.{
-        .allocator = std.testing.allocator,
+        .allocator = allocator,
         .http_client = &http_client,
         .base_url = "http://example.test",
     });
@@ -497,7 +495,7 @@ fn run_generated_client_closes_raw_request_stream_on_transport_error(t: *testing
     var closed = false;
     var body = CloseTrackingBody{ .closed = &closed };
 
-    try std.testing.expectError(error.TransportBoom, api.operations.TextExample.send(bg, std.testing.allocator, .{
+    try std.testing.expectError(error.TransportBoom, api.operations.TextExample.send(bg, allocator, .{
         .body = net.http.ReadCloser.init(&body),
     }));
     try std.testing.expect(closed);
@@ -510,9 +508,9 @@ pub fn TestRunner() testing.TestRunner {
         pub fn run(_: *@This(), t: *testing.T, allocator: std.mem.Allocator) bool {
             _ = allocator;
             t.run("parse, roundtrip, and validate structure", specRunner());
-            t.run("generated client returns status union responses", testing.TestRunner.fromFn(std, run_generated_client_returns_status_union_responses));
-            t.run("generated client and server exchange raw request and respons", testing.TestRunner.fromFn(std, run_generated_client_and_server_exchange_raw_request_and_respons));
-            t.run("generated client closes raw request stream on transport error", testing.TestRunner.fromFn(std, run_generated_client_closes_raw_request_stream_on_transport_error));
+            t.run("generated client returns status union responses", testing.TestRunner.fromFn(std, 1024 * 1024, run_generated_client_returns_status_union_responses));
+            t.run("generated client and server exchange raw request and response", testing.TestRunner.fromFn(std, 1024 * 1024, run_generated_client_and_server_exchange_raw_request_and_response));
+            t.run("generated client closes raw request stream on transport error", testing.TestRunner.fromFn(std, 1024 * 1024, run_generated_client_closes_raw_request_stream_on_transport_error));
             return t.wait();
         }
 

@@ -74,6 +74,7 @@ const ResponsePayloadKind = enum {
     none,
     json,
     raw,
+    sse,
 };
 
 const ResponseVariant = struct {
@@ -275,7 +276,7 @@ fn OperationType(
         break :blk items;
     };
     const ArgsType = makeArgsType(parameters, request_body);
-    const ResponseType = makeServerResponseType(response_variants);
+    const ResponseType = makeServerResponseType(embed, response_variants);
     const method = copyString(operation_ref.method);
     const path = copyString(operation_ref.path);
     const handler_field_name = operation_ref.field_name;
@@ -376,6 +377,7 @@ fn OperationType(
         }
 
         fn writeResponse(allocator: embed.mem.Allocator, rw: *Http.ResponseWriter, response_value: ResponseType) !void {
+            const Sse = @import("../sse.zig").make(embed);
             switch (response_value) {
                 inline else => |payload, tag| {
                     const variant = comptime responseVariantByName(response_variants, @tagName(tag));
@@ -387,14 +389,20 @@ fn OperationType(
                                 try rw.setHeader(Http.Header.content_type, content_type);
                             }
                             try rw.writeHeader(status_code);
-                            _ = try rw.write(payload);
+                            try writeAll(rw, payload);
+                        },
+                        .sse => {
+                            var writer = Sse.Writer.init(rw);
+                            try writer.beginWithContentType(status_code, variant.content_type orelse "text/event-stream");
+                            try payload.send(payload.ptr, &writer);
+                            try writer.flush();
                         },
                         .json => {
                             const encoded = try encodeJsonBody(embed, allocator, payload);
                             defer allocator.free(encoded);
                             try rw.setHeader(Http.Header.content_type, variant.content_type orelse "application/json");
                             try rw.writeHeader(status_code);
-                            _ = try rw.write(encoded);
+                            try writeAll(rw, encoded);
                         },
                     }
                 },
@@ -847,6 +855,19 @@ fn responseVariant(
         }
     }
 
+    inline for (response.content) |entry| {
+        if (isSseContentType(entry.name)) {
+            return .{
+                .field_name = responseVariantFieldName(status_name, index),
+                .status_name = copyString(status_name),
+                .status_code = parseStatusCode(status_name),
+                .payload_kind = .sse,
+                .payload_type = void,
+                .content_type = copyString(entry.name),
+            };
+        }
+    }
+
     if (response.content.len != 0) {
         return .{
             .field_name = responseVariantFieldName(status_name, index),
@@ -868,22 +889,29 @@ fn responseVariant(
     };
 }
 
-fn makeServerResponseType(comptime variants: anytype) type {
+fn makeServerResponseType(comptime embed: type, comptime variants: anytype) type {
     if (variants.len == 0) return void;
 
+    const Sse = @import("../sse.zig").make(embed);
     var enum_fields: [variants.len]Type.EnumField = undefined;
     var union_fields: [variants.len]Type.UnionField = undefined;
 
     inline for (variants, 0..) |variant, index| {
         ensureUniqueResponseVariantName(variants[0..index], variant.field_name, variant.status_name);
+        const payload_type = switch (variant.payload_kind) {
+            .none => void,
+            .json => variant.payload_type,
+            .raw => variant.payload_type,
+            .sse => Sse.Stream,
+        };
         enum_fields[index] = .{
             .name = variant.field_name,
             .value = index,
         };
         union_fields[index] = .{
             .name = variant.field_name,
-            .type = variant.payload_type,
-            .alignment = @alignOf(variant.payload_type),
+            .type = payload_type,
+            .alignment = @alignOf(payload_type),
         };
     }
 
@@ -1125,10 +1153,26 @@ fn parseLocalComponentRef(comptime ref_path: []const u8, comptime prefix: []cons
 }
 
 fn isJsonContentType(comptime name: []const u8) bool {
-    return std.mem.eql(u8, name, "application/json") or
-        std.mem.eql(u8, name, "text/json") or
-        std.mem.eql(u8, name, "application/*+json") or
-        std.mem.endsWith(u8, name, "+json");
+    const base = mediaTypeBase(name);
+    return std.ascii.eqlIgnoreCase(base, "application/json") or
+        std.ascii.eqlIgnoreCase(base, "text/json") or
+        (base.len >= 5 and std.ascii.eqlIgnoreCase(base[base.len - 5 ..], "+json"));
+}
+
+fn isSseContentType(comptime name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(mediaTypeBase(name), "text/event-stream");
+}
+
+fn mediaTypeBase(comptime name: []const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, name, ';') orelse name.len;
+    return std.mem.trim(u8, name[0..end], " \t");
+}
+
+fn writeAll(writer: anytype, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        offset += try writer.write(bytes[offset..]);
+    }
 }
 
 fn deriveOperationName(comptime method: []const u8, comptime path: []const u8) []const u8 {

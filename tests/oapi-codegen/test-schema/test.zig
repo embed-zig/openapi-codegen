@@ -406,6 +406,6 @@ fn run_generated_client_sends_typed_requests(t: *testing.T, allocator: std.mem.A
 pub fn TestRunner(comptime phase: Phase) testing.TestRunner {
     return switch (phase) {
         .spec => specRunner(),
-        .typed_requests => testing.TestRunner.fromFn(std, run_generated_client_sends_typed_requests),
+        .typed_requests => testing.TestRunner.fromFn(std, 1024 * 1024, run_generated_client_sends_typed_requests),
     };
 }

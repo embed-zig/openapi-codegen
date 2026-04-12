@@ -496,7 +496,7 @@ fn specRunner() testing.TestRunner {
 pub fn TestRunner(comptime phase: Phase) testing.TestRunner {
     return switch (phase) {
         .spec => specRunner(),
-        .compile_heavy => testing.TestRunner.fromFn(std, struct {
+        .compile_heavy => testing.TestRunner.fromFn(std, 1024 * 1024, struct {
             fn run(t: *testing.T, allocator: std.mem.Allocator) !void {
                 _ = t;
                 _ = allocator;

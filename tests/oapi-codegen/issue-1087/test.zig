@@ -80,7 +80,7 @@ fn specRunner() testing.TestRunner {
 pub fn TestRunner(comptime phase: Phase) testing.TestRunner {
     return switch (phase) {
         .spec => specRunner(),
-        .external_response_refs => testing.TestRunner.fromFn(std, struct {
+        .external_response_refs => testing.TestRunner.fromFn(std, 1024 * 1024, struct {
             fn run(t: *testing.T, allocator: std.mem.Allocator) !void {
                 _ = t;
                 _ = allocator;

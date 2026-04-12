@@ -25,8 +25,9 @@
 ## 克隆后自测
 
 ```sh
-zig build test     # tests/oapi-codegen/ 夹具
-zig build example # 运行 tests/examples/（含 petstore）
+zig build unit    # runtime/unit 覆盖（含 SSE flush 与 ownership 回归）
+zig build example # 运行 tests/examples/（petstore、stream、sse）
+zig build test    # 运行 unit + example + tests/oapi-codegen/ 夹具
 ```
 
 ## 在你自己的工程里依赖
@@ -193,7 +194,7 @@ switch (resp.value) {
 
 **请求体类型：** JSON 请求仍然直接传类型化的 `.body`。对于 **非 JSON 请求体**（`text/plain`、`application/octet-stream` 等），`.body` 需要传 **`net.http.ReadCloser`**，这样 client 会按流式上传；server 侧 raw handler 收到的也是这个 `ReadCloser`，应按需循环 `read`，并在完成后 `close`。
 
-**响应类型：** `send` 返回带 `.value` 的句柄，按 HTTP 状态分支。用完后照常 `defer resp.deinit()`。**JSON** 分支是解析后的 model；**非 JSON**（`text/plain`、`application/octet-stream` 等）分支是 **`net.http.ReadCloser`**：可循环 `read` 做流式读取（例如写入文件），再由 `deinit` 关闭 body 并释放底层 `http.Response`。JSON model 在 `ClientApi.models` 上。
+**响应类型：** `send` 返回带 `.value` 的句柄，按 HTTP 状态分支。用完后照常 `defer resp.deinit()`。**JSON** 分支是解析后的 model，仍由外层 response 句柄统一释放。**非 JSON 流式响应**（`text/plain`、`application/octet-stream` 等）分支是 **`net.http.ReadCloser`**：可循环 `read` 做流式读取（例如写入文件），但需要先由调用方自己 `close()`，再调用外层 `resp.deinit()`。`text/event-stream` 响应返回 `codegen.sse.Reader`：消费事件后先 `stream.deinit()`，再调用外层 `resp.deinit()`。JSON model 在 `ClientApi.models` 上。
 
 ## 致谢
 

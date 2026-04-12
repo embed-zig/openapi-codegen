@@ -1,0 +1,31 @@
+const ReaderMod = @import("sse/Reader.zig");
+const WriterMod = @import("sse/Writer.zig");
+
+pub fn make(comptime embed: type) type {
+    return struct {
+        pub const Event = struct {
+            event: ?[]const u8 = null,
+            id: ?[]const u8 = null,
+            data: ?[]const u8 = null,
+            retry: ?u64 = null,
+
+            pub fn deinit(self: *@This(), allocator: embed.mem.Allocator) void {
+                if (self.event) |value| allocator.free(value);
+                if (self.id) |value| allocator.free(value);
+                if (self.data) |value| allocator.free(value);
+                self.* = .{};
+            }
+        };
+
+        pub const Reader = ReaderMod.make(embed, Event);
+        pub const Writer = WriterMod.make(embed, Event);
+        pub const ReaderTestRunner = ReaderMod.TestRunner;
+        pub const WriterTestRunner = WriterMod.TestRunner;
+        pub const Handler = *const fn (ptr: *anyopaque, writer: *Writer) anyerror!void;
+
+        pub const Stream = struct {
+            ptr: *anyopaque,
+            send: Handler,
+        };
+    };
+}

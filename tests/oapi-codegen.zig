@@ -1,7 +1,7 @@
 const std = @import("std");
 const testing = @import("testing");
 
-test "oapi-codegen fixtures" {
+test "oapi-codegen" {
     std.testing.log_level = .info;
     
     var t = testing.T.new(std, .oapi_codegen_fixtures);
