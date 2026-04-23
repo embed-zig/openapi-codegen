@@ -1,11 +1,13 @@
-const testing = @import("testing");
-const embed = @import("embed_std").std;
-const context_mod = @import("context");
+const testing = embed.testing;
+const std = @import("std");
+const embed = @import("embed");
+const lib = @import("embed_std").std;
+const context_mod = embed.context;
 const openapi = @import("openapi");
 const codegen = @import("codegen");
-const net_mod = @import("net");
+const net_mod = embed.net;
 
-const net = net_mod.make(embed);
+const net = net_mod.make(lib);
 
 fn files() openapi.Files {
     const spec = openapi.json.parse(@embedFile("spec.json"));
@@ -14,7 +16,7 @@ fn files() openapi.Files {
     };
 }
 
-const ClientApi = codegen.client.make(embed, files());
+const ClientApi = codegen.client.make(lib, files());
 
 const CountingBody = struct {
     bytes: []const u8,
@@ -57,12 +59,12 @@ const SingleResponseTransport = struct {
     }
 };
 
-fn runOwnershipTests(_: *testing.T, allocator: embed.mem.Allocator) !void {
+fn runOwnershipTests(_: *testing.T, allocator: lib.mem.Allocator) !void {
     try runRawOwnershipTest(allocator);
     try runSseOwnershipTest(allocator);
 }
 
-fn runRawOwnershipTest(allocator: embed.mem.Allocator) !void {
+fn runRawOwnershipTest(allocator: lib.mem.Allocator) !void {
     var body = CountingBody{ .bytes = "raw-payload" };
     var transport = SingleResponseTransport.init(&body, "application/octet-stream");
     var http_client = try net.http.Client.init(allocator, .{
@@ -77,7 +79,7 @@ fn runRawOwnershipTest(allocator: embed.mem.Allocator) !void {
     });
     defer api.deinit();
 
-    var ctx_ns = try context_mod.make(embed).init(allocator);
+    var ctx_ns = try context_mod.make(lib).init(allocator);
     defer ctx_ns.deinit();
     const bg = ctx_ns.background();
     const resp = try api.operations.streamDownload.send(bg, allocator, .{});
@@ -89,16 +91,16 @@ fn runRawOwnershipTest(allocator: embed.mem.Allocator) !void {
         },
     }
 
-    try embed.testing.expectEqual(@as(usize, 1), body.close_calls);
+    try std.testing.expectEqual(@as(usize, 1), body.close_calls);
     resp.deinit();
-    try embed.testing.expectEqual(@as(usize, 1), body.close_calls);
+    try std.testing.expectEqual(@as(usize, 1), body.close_calls);
 }
 
 pub fn TestRunner() testing.TestRunner {
-    return testing.TestRunner.fromFn(embed, 1024 * 1024, runOwnershipTests);
+    return testing.TestRunner.fromFn(lib, 1024 * 1024, runOwnershipTests);
 }
 
-fn runSseOwnershipTest(allocator: embed.mem.Allocator) !void {
+fn runSseOwnershipTest(allocator: lib.mem.Allocator) !void {
     var body = CountingBody{ .bytes = "event: message\nid: 1\ndata: hello\n\n" };
     var transport = SingleResponseTransport.init(&body, "text/event-stream");
     var http_client = try net.http.Client.init(allocator, .{
@@ -113,21 +115,21 @@ fn runSseOwnershipTest(allocator: embed.mem.Allocator) !void {
     });
     defer api.deinit();
 
-    var ctx_ns = try context_mod.make(embed).init(allocator);
+    var ctx_ns = try context_mod.make(lib).init(allocator);
     defer ctx_ns.deinit();
     const bg = ctx_ns.background();
     const resp = try api.operations.watchEvents.send(bg, allocator, .{});
     switch (resp.value) {
         .status_200 => |*stream| {
             const evt = (try stream.next()) orelse return error.MissingEvent;
-            try embed.testing.expectEqualStrings("message", evt.event.?);
-            try embed.testing.expectEqualStrings("1", evt.id.?);
-            try embed.testing.expectEqualStrings("hello", evt.data.?);
+            try std.testing.expectEqualStrings("message", evt.event.?);
+            try std.testing.expectEqualStrings("1", evt.id.?);
+            try std.testing.expectEqualStrings("hello", evt.data.?);
             stream.deinit();
         },
     }
 
-    try embed.testing.expectEqual(@as(usize, 1), body.close_calls);
+    try std.testing.expectEqual(@as(usize, 1), body.close_calls);
     resp.deinit();
-    try embed.testing.expectEqual(@as(usize, 1), body.close_calls);
+    try std.testing.expectEqual(@as(usize, 1), body.close_calls);
 }

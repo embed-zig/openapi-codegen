@@ -1,7 +1,8 @@
-const std = @import("std");
+const zig = @import("std");
+const embed = @import("embed");
 
 pub fn make(comptime lib: type, comptime Event: type) type {
-    const Http = @import("net").make(lib).http;
+    const Http = embed.net.make(lib).http;
 
     return struct {
         rw: *Http.ResponseWriter,
@@ -50,7 +51,7 @@ fn writeEventTo(rw: anytype, evt: anytype) !void {
     if (evt.id) |value| try writeFieldLine(rw, "id", value);
     if (evt.retry) |value| {
         var retry_buf: [32]u8 = undefined;
-        const text = try std.fmt.bufPrint(&retry_buf, "{d}", .{value});
+        const text = try zig.fmt.bufPrint(&retry_buf, "{d}", .{value});
         try writeFieldLine(rw, "retry", text);
     }
     if (evt.data) |value| {
@@ -78,7 +79,7 @@ fn writeDataLines(rw: anytype, value: []const u8) !void {
 
     var start: usize = 0;
     while (true) {
-        const newline = std.mem.indexOfScalarPos(u8, value, start, '\n') orelse {
+        const newline = zig.mem.indexOfScalarPos(u8, value, start, '\n') orelse {
             try writeFieldLine(rw, "data", trimTrailingCarriageReturn(value[start..]));
             return;
         };
@@ -103,7 +104,6 @@ fn trimTrailingCarriageReturn(value: []const u8) []const u8 {
 pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api.TestRunner {
     return testing_api.TestRunner.fromFn(lib, 1024 * 1024, struct {
         fn run(_: *testing_api.T, allocator: lib.mem.Allocator) !void {
-            const testing = lib.testing;
             const EventLocal = struct {
                 event: ?[]const u8 = null,
                 id: ?[]const u8 = null,
@@ -139,7 +139,7 @@ pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api
 
                 pub fn setHeader(self: *@This(), name: []const u8, value: []const u8) !void {
                     for (self.headers.items) |*header| {
-                        if (std.mem.eql(u8, header.name, name)) {
+                        if (zig.mem.eql(u8, header.name, name)) {
                             header.value = value;
                             return;
                         }
@@ -163,7 +163,7 @@ pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api
 
                 fn headerValue(self: *@This(), name: []const u8) ?[]const u8 {
                     for (self.headers.items) |header| {
-                        if (std.mem.eql(u8, header.name, name)) return header.value;
+                        if (zig.mem.eql(u8, header.name, name)) return header.value;
                     }
                     return null;
                 }
@@ -173,10 +173,10 @@ pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api
                 defer rw.deinit();
 
                 try writePreludeTo(&rw, 200, "text/event-stream");
-                try testing.expectEqual(@as(u16, 200), rw.status_code);
-                try testing.expectEqualStrings("text/event-stream", rw.headerValue("Content-Type").?);
-                try testing.expectEqualStrings("no-cache", rw.headerValue("Cache-Control").?);
-                try testing.expect(rw.keep_alive);
+                try zig.testing.expectEqual(@as(u16, 200), rw.status_code);
+                try zig.testing.expectEqualStrings("text/event-stream", rw.headerValue("Content-Type").?);
+                try zig.testing.expectEqualStrings("no-cache", rw.headerValue("Cache-Control").?);
+                try zig.testing.expect(rw.keep_alive);
             }
 
             {
@@ -184,7 +184,7 @@ pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api
                 defer rw.deinit();
 
                 try writePreludeTo(&rw, 200, "text/event-stream; charset=utf-8");
-                try testing.expectEqualStrings("text/event-stream; charset=utf-8", rw.headerValue("Content-Type").?);
+                try zig.testing.expectEqualStrings("text/event-stream; charset=utf-8", rw.headerValue("Content-Type").?);
             }
 
             {
@@ -197,7 +197,7 @@ pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api
                     .data = "hello\nworld",
                     .retry = 1500,
                 });
-                try testing.expectEqualStrings(
+                try zig.testing.expectEqualStrings(
                     "event: message\nid: 7\nretry: 1500\ndata: hello\ndata: world\n\n",
                     rw.body.items,
                 );
@@ -208,7 +208,7 @@ pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api
                 defer rw.deinit();
 
                 try writeEventTo(&rw, EventLocal{ .data = "" });
-                try testing.expectEqualStrings("data:\n\n", rw.body.items);
+                try zig.testing.expectEqualStrings("data:\n\n", rw.body.items);
             }
 
         }

@@ -1,4 +1,5 @@
-const testing = @import("testing");
+const embed = @import("embed");
+const testing = embed.testing;
 const std = @import("std");
 const openapi = @import("openapi");
 

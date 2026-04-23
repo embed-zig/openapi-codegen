@@ -1,12 +1,13 @@
-const testing = @import("testing");
+const testing = embed.testing;
 const std = @import("std");
 const openapi = @import("openapi");
 const codegen = @import("codegen");
-const net_mod = @import("net");
+const net_mod = embed.net;
 
-const embed = @import("embed_std").std;
-const Context = @import("context").Context;
-const net = @import("net").make(embed);
+const embed = @import("embed");
+const lib = @import("embed_std").std;
+const Context = embed.context.Context;
+const net = embed.net.make(lib);
 
 const ClientApi = blk: {
     const spec = openapi.json.parse(@embedFile("spec.json"));
@@ -15,7 +16,7 @@ const ClientApi = blk: {
             .{ .name = "spec.json", .spec = spec },
         },
     };
-    break :blk codegen.client.make(embed, files);
+    break :blk codegen.client.make(lib, files);
 };
 
 const ServerApi = blk: {
@@ -25,7 +26,7 @@ const ServerApi = blk: {
             .{ .name = "spec.json", .spec = spec },
         },
     };
-    break :blk codegen.server.make(embed, files);
+    break :blk codegen.server.make(lib, files);
 };
 
 pub const Phase = enum {
@@ -92,7 +93,7 @@ const AppContext = struct {
 };
 
 const Handlers = struct {
-    fn test_(ctx_ptr: *anyopaque, req_ctx: Context, allocator: embed.mem.Allocator, args: ServerApi.operations.@"test".Args) !ServerApi.operations.@"test".Response {
+    fn test_(ctx_ptr: *anyopaque, req_ctx: Context, allocator: lib.mem.Allocator, args: ServerApi.operations.@"test".Args) !ServerApi.operations.@"test".Response {
         _ = req_ctx;
         _ = allocator;
         const ctx: *AppContext = @ptrCast(@alignCast(ctx_ptr));
@@ -106,7 +107,7 @@ const ServerRun = struct {
     listener: net_mod.Listener,
     port: u16,
     server_err: ?anyerror = null,
-    thread: embed.Thread,
+    thread: lib.Thread,
 
     fn stop(self: *@This(), server: *ServerApi) !void {
         self.listener.close();
@@ -131,7 +132,7 @@ fn startServer(server: *ServerApi) !ServerRun {
         .port = port,
         .thread = undefined,
     };
-    run.thread = try embed.Thread.spawn(.{}, struct {
+    run.thread = try lib.Thread.spawn(.{}, struct {
         fn exec(s: *ServerApi, ln: net_mod.Listener, err: *?anyerror) void {
             s.serve(ln) catch |serve_err| {
                 err.* = serve_err;
@@ -144,7 +145,7 @@ fn startServer(server: *ServerApi) !ServerRun {
 fn run_zig_semantic_equivalent_for_strict_framework_response_handli(t: *testing.T, allocator: std.mem.Allocator) !void {
     _ = t;
     _ = allocator;
-    var ctx_ns = try @import("context").make(embed).init(std.testing.allocator);
+    var ctx_ns = try embed.context.make(lib).init(std.testing.allocator);
     defer ctx_ns.deinit();
     const bg = ctx_ns.background();
 
@@ -157,7 +158,7 @@ fn run_zig_semantic_equivalent_for_strict_framework_response_handli(t: *testing.
     var run_inner = try startServer(&server);
     defer run_inner.stop(&server) catch {};
 
-    const base_url = try embed.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}", .{run_inner.port});
+    const base_url = try lib.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}", .{run_inner.port});
     defer std.testing.allocator.free(base_url);
 
     var transport = try net.http.Transport.init(std.testing.allocator, .{});

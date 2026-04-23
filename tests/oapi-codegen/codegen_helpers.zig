@@ -28,16 +28,16 @@ pub fn assertModelsCompile(comptime files: openapi.Files) void {
     _ = codegen.models.make(files);
 }
 
-pub fn assertClientCompile(comptime embed: type, comptime files: openapi.Files) void {
-    _ = codegen.client.make(embed, files);
+pub fn assertClientCompile(comptime lib: type, comptime files: openapi.Files) void {
+    _ = codegen.client.make(lib, files);
 }
 
-pub fn assertServerCompile(comptime embed: type, comptime files: openapi.Files) void {
-    _ = codegen.server.make(embed, files);
+pub fn assertServerCompile(comptime lib: type, comptime files: openapi.Files) void {
+    _ = codegen.server.make(lib, files);
 }
 
-pub fn assertClientServerCompile(comptime embed: type, comptime files: openapi.Files) void {
+pub fn assertClientServerCompile(comptime lib: type, comptime files: openapi.Files) void {
     assertModelsCompile(files);
-    assertClientCompile(embed, files);
-    assertServerCompile(embed, files);
+    assertClientCompile(lib, files);
+    assertServerCompile(lib, files);
 }

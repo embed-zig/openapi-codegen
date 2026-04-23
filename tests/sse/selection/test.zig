@@ -1,11 +1,13 @@
-const testing = @import("testing");
-const embed = @import("embed_std").std;
-const context_mod = @import("context");
+const testing = embed.testing;
+const std = @import("std");
+const embed = @import("embed");
+const lib = @import("embed_std").std;
+const context_mod = embed.context;
 const openapi = @import("openapi");
 const codegen = @import("codegen");
-const net_mod = @import("net");
+const net_mod = embed.net;
 
-const net = net_mod.make(embed);
+const net = net_mod.make(lib);
 
 fn files() openapi.Files {
     const spec = openapi.json.parse(@embedFile("spec.json"));
@@ -14,7 +16,7 @@ fn files() openapi.Files {
     };
 }
 
-const ClientApi = codegen.client.make(embed, files());
+const ClientApi = codegen.client.make(lib, files());
 
 const CountingBody = struct {
     bytes: []const u8,
@@ -57,12 +59,12 @@ const SingleResponseTransport = struct {
     }
 };
 
-fn runSelectionTests(_: *testing.T, allocator: embed.mem.Allocator) !void {
+fn runSelectionTests(_: *testing.T, allocator: lib.mem.Allocator) !void {
     try runParameterizedSseSelectionTest(allocator);
     try runMixedResponseSelectionTest(allocator);
 }
 
-fn runParameterizedSseSelectionTest(allocator: embed.mem.Allocator) !void {
+fn runParameterizedSseSelectionTest(allocator: lib.mem.Allocator) !void {
     var body = CountingBody{ .bytes = "data: hello\n\n" };
     var transport = SingleResponseTransport.init(&body, "text/event-stream");
     var http_client = try net.http.Client.init(allocator, .{
@@ -77,27 +79,27 @@ fn runParameterizedSseSelectionTest(allocator: embed.mem.Allocator) !void {
     });
     defer api.deinit();
 
-    var ctx_ns = try context_mod.make(embed).init(allocator);
+    var ctx_ns = try context_mod.make(lib).init(allocator);
     defer ctx_ns.deinit();
     const bg = ctx_ns.background();
     const resp = try api.operations.watchEventsParameterized.send(bg, allocator, .{});
     switch (resp.value) {
         .status_200 => |*stream| {
             const evt = (try stream.next()) orelse return error.MissingEvent;
-            try embed.testing.expectEqualStrings("hello", evt.data.?);
+            try std.testing.expectEqualStrings("hello", evt.data.?);
             stream.deinit();
         },
     }
 
     resp.deinit();
-    try embed.testing.expectEqual(@as(usize, 1), body.close_calls);
+    try std.testing.expectEqual(@as(usize, 1), body.close_calls);
 }
 
 pub fn TestRunner() testing.TestRunner {
-    return testing.TestRunner.fromFn(embed, 1024 * 1024, runSelectionTests);
+    return testing.TestRunner.fromFn(lib, 1024 * 1024, runSelectionTests);
 }
 
-fn runMixedResponseSelectionTest(allocator: embed.mem.Allocator) !void {
+fn runMixedResponseSelectionTest(allocator: lib.mem.Allocator) !void {
     var body = CountingBody{ .bytes = "{\"message\":\"ok\"}" };
     var transport = SingleResponseTransport.init(&body, "application/json");
     var http_client = try net.http.Client.init(allocator, .{
@@ -112,16 +114,16 @@ fn runMixedResponseSelectionTest(allocator: embed.mem.Allocator) !void {
     });
     defer api.deinit();
 
-    var ctx_ns = try context_mod.make(embed).init(allocator);
+    var ctx_ns = try context_mod.make(lib).init(allocator);
     defer ctx_ns.deinit();
     const bg = ctx_ns.background();
     const resp = try api.operations.getMixedResponse.send(bg, allocator, .{});
     switch (resp.value) {
         .status_200 => |payload| {
-            try embed.testing.expectEqualStrings("ok", payload.value.message);
+            try std.testing.expectEqualStrings("ok", payload.value.message);
         },
     }
 
     resp.deinit();
-    try embed.testing.expectEqual(@as(usize, 1), body.close_calls);
+    try std.testing.expectEqual(@as(usize, 1), body.close_calls);
 }

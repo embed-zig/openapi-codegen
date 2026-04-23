@@ -1,5 +1,5 @@
 const std = @import("std");
-const embed = @import("embed");
+const lib = @import("embed_std").std;
 const openapi = @import("openapi");
 const Spec = openapi.Spec;
 const Files = openapi.Files;
@@ -838,7 +838,7 @@ fn additionalPropertiesFieldType(
 
     const value_type = if (schema.additional_properties) |additional_properties|
         switch (additional_properties) {
-            .boolean => |enabled| if (enabled) embed.json.Value else return null,
+            .boolean => |enabled| if (enabled) lib.json.Value else return null,
             .schema => |value_schema| lowerSchemaOrRef(
                 files,
                 current_file_name,
@@ -847,29 +847,29 @@ fn additionalPropertiesFieldType(
             ),
         }
     else
-        embed.json.Value;
+        lib.json.Value;
 
     return AdditionalPropertiesMap(value_type);
 }
 
 fn AdditionalPropertiesMap(comptime ValueType: type) type {
-    const Inner = embed.json.ArrayHashMap(ValueType);
+    const Inner = lib.json.ArrayHashMap(ValueType);
     return struct {
         storage: Inner = .{},
 
         pub const additional_properties_value_type = ValueType;
 
-        pub fn deinit(self: *@This(), allocator: embed.mem.Allocator) void {
+        pub fn deinit(self: *@This(), allocator: lib.mem.Allocator) void {
             self.storage.deinit(allocator);
         }
 
-        pub fn jsonParse(allocator: embed.mem.Allocator, source: anytype, options: embed.json.ParseOptions) !@This() {
+        pub fn jsonParse(allocator: lib.mem.Allocator, source: anytype, options: lib.json.ParseOptions) !@This() {
             return .{
                 .storage = try Inner.jsonParse(allocator, source, options),
             };
         }
 
-        pub fn jsonParseFromValue(allocator: embed.mem.Allocator, source: embed.json.Value, options: embed.json.ParseOptions) !@This() {
+        pub fn jsonParseFromValue(allocator: lib.mem.Allocator, source: lib.json.Value, options: lib.json.ParseOptions) !@This() {
             return .{
                 .storage = try Inner.jsonParseFromValue(allocator, source, options),
             };
@@ -907,17 +907,17 @@ fn mergeAdditionalPropertiesFieldTypes(comptime existing_type: type, comptime in
     const incoming_base = if (incoming_optional) optionalChildType(incoming_type) else incoming_type;
 
     if (!isAdditionalPropertiesMapType(existing_base) or !isAdditionalPropertiesMapType(incoming_base)) {
-        return if (existing_type == incoming_type) existing_type else optionalizeType(embed.json.Value);
+        return if (existing_type == incoming_type) existing_type else optionalizeType(lib.json.Value);
     }
 
     const existing_value = additionalPropertiesValueType(existing_base);
     const incoming_value = additionalPropertiesValueType(incoming_base);
-    const merged_value = if (existing_value == incoming_value or existing_value == embed.json.Value)
+    const merged_value = if (existing_value == incoming_value or existing_value == lib.json.Value)
         existing_value
-    else if (incoming_value == embed.json.Value)
+    else if (incoming_value == lib.json.Value)
         incoming_value
     else
-        embed.json.Value;
+        lib.json.Value;
 
     const merged_base = AdditionalPropertiesMap(merged_value);
     if (existing_optional or incoming_optional) return optionalizeType(merged_base);

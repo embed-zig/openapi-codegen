@@ -1,12 +1,11 @@
 const std = @import("std");
+const embed = @import("embed");
 const openapi = @import("openapi");
 const models_mod = @import("models.zig");
-const context_mod = @import("context");
 
 const Files = openapi.Files;
 const Spec = openapi.Spec;
 const Type = std.builtin.Type;
-const Context = context_mod.Context;
 
 const RootFile = struct {
     name: []const u8,
@@ -86,13 +85,13 @@ const ResponseVariant = struct {
     content_type: ?[]const u8,
 };
 
-pub fn make(comptime embed: type, comptime files: Files) type {
+pub fn make(comptime lib: type, comptime files: Files) type {
     @setEvalBranchQuota(300_000);
 
     const root = rootFile(files);
-    const net = @import("net").make(embed);
+    const net = embed.net.make(lib);
     const Http = net.http;
-    const ContextNs = context_mod.make(embed);
+    const ContextNs = embed.context.make(lib);
     const Models = models_mod.make(files);
     const spec_title = copyString(root.spec.info.title);
     const spec_version = copyString(root.spec.info.version);
@@ -102,11 +101,11 @@ pub fn make(comptime embed: type, comptime files: Files) type {
         for (operation_refs, 0..) |operation_ref, i| items[i] = operation_ref.field_name;
         break :blk items;
     };
-    const Operations = makeOperationNamespace(embed, files, operation_refs);
+    const Operations = makeOperationNamespace(lib, files, operation_refs);
     const ConfigType = makeConfigType(Operations, operation_names);
 
     const Shared = struct {
-        allocator: embed.mem.Allocator,
+        allocator: lib.mem.Allocator,
         ctx: *anyopaque,
         contexts: ContextNs,
         config: ConfigType,
@@ -137,7 +136,7 @@ pub fn make(comptime embed: type, comptime files: Files) type {
         pub const Config = ConfigType;
         pub const HttpServer = Http.Server;
 
-        pub fn init(allocator: embed.mem.Allocator, ctx: anytype, config: ConfigType) !Self {
+        pub fn init(allocator: lib.mem.Allocator, ctx: anytype, config: ConfigType) !Self {
             const shared = try allocator.create(Shared);
             errdefer allocator.destroy(shared);
 
@@ -170,7 +169,7 @@ pub fn make(comptime embed: type, comptime files: Files) type {
             self.* = undefined;
         }
 
-        pub fn serve(self: *Self, listener: @import("net").Listener) anyerror!void {
+        pub fn serve(self: *Self, listener: embed.net.Listener) anyerror!void {
             return self.http_server.serve(listener);
         }
 
@@ -195,14 +194,14 @@ pub fn make(comptime embed: type, comptime files: Files) type {
 }
 
 fn makeOperationNamespace(
-    comptime embed: type,
+    comptime lib: type,
     comptime files: Files,
     comptime operation_refs: []const OperationRef,
 ) type {
     var fields: [operation_refs.len]Type.StructField = undefined;
 
     inline for (operation_refs, 0..) |operation_ref, index| {
-        const Operation = OperationType(embed, files, operation_ref);
+        const Operation = OperationType(lib, files, operation_ref);
         fields[index] = .{
             .name = operation_ref.field_name,
             .type = type,
@@ -244,12 +243,13 @@ fn makeConfigType(comptime Operations: type, comptime operation_names: anytype) 
 }
 
 fn OperationType(
-    comptime embed: type,
+    comptime lib: type,
     comptime files: Files,
     comptime operation_ref: OperationRef,
 ) type {
-    const net = @import("net").make(embed);
+    const net = embed.net.make(lib);
     const Http = net.http;
+    const Context = embed.context.Context;
     const parameters_slice = collectEffectiveParameters(files, operation_ref.file_name, operation_ref.path_item, operation_ref.operation, operation_ref.field_name);
     const parameters = blk: {
         var items: [parameters_slice.len]ResolvedParameter = undefined;
@@ -268,7 +268,7 @@ fn OperationType(
         }
         break :blk items;
     };
-    const request_body = selectRequestBody(embed, files, operation_ref.file_name, operation_ref.operation.request_body, operation_ref.field_name);
+    const request_body = selectRequestBody(lib, files, operation_ref.file_name, operation_ref.operation.request_body, operation_ref.field_name);
     const response_variants_slice = collectResponseVariants(files, operation_ref.file_name, operation_ref.operation.responses, operation_ref.field_name);
     const response_variants = blk: {
         var items: [response_variants_slice.len]ResponseVariant = undefined;
@@ -276,7 +276,7 @@ fn OperationType(
         break :blk items;
     };
     const ArgsType = makeArgsType(parameters, request_body);
-    const ResponseType = makeServerResponseType(embed, response_variants);
+    const ResponseType = makeServerResponseType(lib, response_variants);
     const method = copyString(operation_ref.method);
     const path = copyString(operation_ref.path);
     const handler_field_name = operation_ref.field_name;
@@ -285,7 +285,7 @@ fn OperationType(
         pub const Args = ArgsType;
         pub const Response = ResponseType;
         /// `allocator` is a request-scoped arena (reset after the response is written). Raw request bodies are `http.ReadCloser`; handlers must read and `close` them.
-        pub const Handler = *const fn (ptr: *anyopaque, ctx: Context, allocator: embed.mem.Allocator, args: ArgsType) anyerror!ResponseType;
+        pub const Handler = *const fn (ptr: *anyopaque, ctx: Context, allocator: lib.mem.Allocator, args: ArgsType) anyerror!ResponseType;
 
         pub fn matches(req: *Http.Request) bool {
             return std.mem.eql(u8, req.effectiveMethod(), method) and pathMatchesTemplate(path, req.url.path);
@@ -297,6 +297,36 @@ fn OperationType(
                 return;
             };
             const request_ctx = req.context() orelse shared.contexts.background();
+            const RawRequestBodyGuard = struct {
+                inner: Http.ReadCloser,
+                drained: bool = false,
+                closed: bool = false,
+
+                fn init(inner: Http.ReadCloser) @This() {
+                    return .{ .inner = inner };
+                }
+
+                pub fn read(self: *@This(), buffer: []u8) anyerror!usize {
+                    const n = try self.inner.read(buffer);
+                    if (n == 0) self.drained = true;
+                    return n;
+                }
+
+                pub fn close(self: *@This()) void {
+                    if (self.closed) return;
+                    self.closed = true;
+                    if (self.drained) return;
+
+                    var buf: [1024]u8 = undefined;
+                    while (true) {
+                        const n = self.inner.read(&buf) catch break;
+                        if (n == 0) {
+                            self.drained = true;
+                            break;
+                        }
+                    }
+                }
+            };
 
             var args: ArgsType = undefined;
             parseParameterGroups(shared.allocator, req, &args) catch {
@@ -307,12 +337,15 @@ fn OperationType(
             var temp_arena = std.heap.ArenaAllocator.init(shared.allocator);
             defer temp_arena.deinit();
             const temp_allocator = temp_arena.allocator();
+            var raw_request_body_guard: RawRequestBodyGuard = undefined;
+            var has_raw_request_body_guard = false;
+            defer if (has_raw_request_body_guard) raw_request_body_guard.close();
 
             if (request_body) |body| {
                 switch (body.payload_kind) {
                     .json => {
                         if (req.body()) |reader| {
-                            const body_bytes = readBody(embed, temp_allocator, reader) catch {
+                            const body_bytes = readBody(lib, temp_allocator, reader) catch {
                                 writePlainStatus(rw, Http.status.bad_request, "Bad Request") catch {};
                                 return;
                             };
@@ -332,7 +365,9 @@ fn OperationType(
                     .raw => {
                         if (req.body_reader) |stolen| {
                             req.body_reader = null;
-                            @field(args, "body") = stolen;
+                            raw_request_body_guard = RawRequestBodyGuard.init(stolen);
+                            has_raw_request_body_guard = true;
+                            @field(args, "body") = Http.ReadCloser.init(&raw_request_body_guard);
                         } else {
                             if (body.required) {
                                 writePlainStatus(rw, Http.status.bad_request, "Bad Request") catch {};
@@ -355,7 +390,7 @@ fn OperationType(
         }
 
         fn parseParameterGroups(
-            allocator: embed.mem.Allocator,
+            allocator: lib.mem.Allocator,
             req: *Http.Request,
             out_args: *ArgsType,
         ) !void {
@@ -376,8 +411,8 @@ fn OperationType(
             }
         }
 
-        fn writeResponse(allocator: embed.mem.Allocator, rw: *Http.ResponseWriter, response_value: ResponseType) !void {
-            const Sse = @import("../sse.zig").make(embed);
+        fn writeResponse(allocator: lib.mem.Allocator, rw: *Http.ResponseWriter, response_value: ResponseType) !void {
+            const Sse = @import("../sse.zig").make(lib);
             switch (response_value) {
                 inline else => |payload, tag| {
                     const variant = comptime responseVariantByName(response_variants, @tagName(tag));
@@ -388,6 +423,9 @@ fn OperationType(
                             if (variant.content_type) |content_type| {
                                 try rw.setHeader(Http.Header.content_type, content_type);
                             }
+                            var len_buf: [32]u8 = undefined;
+                            const len_text = try std.fmt.bufPrint(&len_buf, "{d}", .{payload.len});
+                            try rw.setHeader(Http.Header.content_length, len_text);
                             try rw.writeHeader(status_code);
                             try writeAll(rw, payload);
                         },
@@ -398,7 +436,7 @@ fn OperationType(
                             try writer.flush();
                         },
                         .json => {
-                            const encoded = try encodeJsonBody(embed, allocator, payload);
+                            const encoded = try encodeJsonBody(lib, allocator, payload);
                             defer allocator.free(encoded);
                             try rw.setHeader(Http.Header.content_type, variant.content_type orelse "application/json");
                             try rw.writeHeader(status_code);
@@ -773,13 +811,13 @@ fn selectParameterSchema(comptime parameter: Spec.Parameter) ?struct {
 }
 
 fn selectRequestBody(
-    comptime embed: type,
+    comptime lib: type,
     comptime files: Files,
     comptime current_file_name: []const u8,
     comptime request_body_or_ref: ?Spec.RequestBodyOrRef,
     comptime context_name: []const u8,
 ) ?SelectedRequestBody {
-    const Http = @import("net").make(embed).http;
+    const Http = embed.net.make(lib).http;
     const request_body = request_body_or_ref orelse return null;
     const resolved = resolveRequestBodyOrRef(files, current_file_name, request_body);
 
@@ -889,10 +927,10 @@ fn responseVariant(
     };
 }
 
-fn makeServerResponseType(comptime embed: type, comptime variants: anytype) type {
+fn makeServerResponseType(comptime lib: type, comptime variants: anytype) type {
     if (variants.len == 0) return void;
 
-    const Sse = @import("../sse.zig").make(embed);
+    const Sse = @import("../sse.zig").make(lib);
     var enum_fields: [variants.len]Type.EnumField = undefined;
     var union_fields: [variants.len]Type.UnionField = undefined;
 
@@ -1106,8 +1144,8 @@ fn parseArgumentValue(comptime T: type, value: ?[]const u8, allocator: anytype, 
     }
 }
 
-fn readBody(comptime embed: type, allocator: embed.mem.Allocator, reader: anytype) ![]u8 {
-    var list = try embed.ArrayList(u8).initCapacity(allocator, 0);
+fn readBody(comptime lib: type, allocator: lib.mem.Allocator, reader: anytype) ![]u8 {
+    var list = try lib.ArrayList(u8).initCapacity(allocator, 0);
     defer list.deinit(allocator);
 
     var buffer: [1024]u8 = undefined;
@@ -1121,8 +1159,8 @@ fn readBody(comptime embed: type, allocator: embed.mem.Allocator, reader: anytyp
     return try list.toOwnedSlice(allocator);
 }
 
-fn encodeJsonBody(comptime embed: type, allocator: embed.mem.Allocator, value: anytype) ![]u8 {
-    return try embed.fmt.allocPrint(allocator, "{f}", .{embed.json.fmt(value, .{})});
+fn encodeJsonBody(comptime lib: type, allocator: lib.mem.Allocator, value: anytype) ![]u8 {
+    return try lib.fmt.allocPrint(allocator, "{f}", .{lib.json.fmt(value, .{})});
 }
 
 fn writePlainStatus(rw: anytype, status_code: u16, body: []const u8) !void {

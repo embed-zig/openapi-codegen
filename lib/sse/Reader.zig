@@ -1,19 +1,21 @@
-const std = @import("std");
+const zig = @import("std");
+const embed = @import("embed");
 
 pub fn make(comptime lib: type, comptime Event: type) type {
-    const Http = @import("net").make(lib).http;
+    const std = lib;
+    const Http = embed.net.make(lib).http;
 
     return struct {
-        allocator: lib.mem.Allocator,
+        allocator: std.mem.Allocator,
         body: Http.ReadCloser,
-        buffer: lib.ArrayList(u8) = .{},
+        buffer: std.ArrayList(u8) = .{},
         cursor: usize = 0,
         eof: bool = false,
         current_event: Event = .{},
 
         const Self = @This();
 
-        pub fn init(allocator: lib.mem.Allocator, body: Http.ReadCloser) Self {
+        pub fn init(allocator: std.mem.Allocator, body: Http.ReadCloser) Self {
             return .{
                 .allocator = allocator,
                 .body = body,
@@ -36,7 +38,7 @@ pub fn make(comptime lib: type, comptime Event: type) type {
             var event: Event = .{};
             errdefer event.deinit(self.allocator);
 
-            var data_builder: lib.ArrayList(u8) = .{};
+            var data_builder: std.ArrayList(u8) = .{};
             defer data_builder.deinit(self.allocator);
 
             var has_fields = false;
@@ -59,7 +61,7 @@ pub fn make(comptime lib: type, comptime Event: type) type {
 
                 if (line[0] == ':') continue;
 
-                const colon = std.mem.indexOfScalar(u8, line, ':');
+                const colon = zig.mem.indexOfScalar(u8, line, ':');
                 const name = if (colon) |idx| line[0..idx] else line;
                 const raw_value = if (colon) |idx| blk: {
                     var start = idx + 1;
@@ -67,27 +69,27 @@ pub fn make(comptime lib: type, comptime Event: type) type {
                     break :blk line[start..];
                 } else "";
 
-                if (std.mem.eql(u8, name, "data")) {
+                if (zig.mem.eql(u8, name, "data")) {
                     has_fields = true;
                     saw_data_field = true;
                     if (data_builder.items.len != 0) try data_builder.append(self.allocator, '\n');
                     try data_builder.appendSlice(self.allocator, raw_value);
                     continue;
                 }
-                if (std.mem.eql(u8, name, "event")) {
+                if (zig.mem.eql(u8, name, "event")) {
                     has_fields = true;
                     try replaceOwned(self.allocator, &event.event, raw_value);
                     continue;
                 }
-                if (std.mem.eql(u8, name, "id")) {
-                    if (std.mem.indexOfScalar(u8, raw_value, 0) != null) continue;
+                if (zig.mem.eql(u8, name, "id")) {
+                    if (zig.mem.indexOfScalar(u8, raw_value, 0) != null) continue;
                     has_fields = true;
                     try replaceOwned(self.allocator, &event.id, raw_value);
                     continue;
                 }
-                if (std.mem.eql(u8, name, "retry")) {
+                if (zig.mem.eql(u8, name, "retry")) {
                     has_fields = true;
-                    event.retry = try std.fmt.parseInt(u64, raw_value, 10);
+                    event.retry = try zig.fmt.parseInt(u64, raw_value, 10);
                     continue;
                 }
             }
@@ -95,7 +97,7 @@ pub fn make(comptime lib: type, comptime Event: type) type {
 
         fn nextLine(self: *Self) !?[]u8 {
             while (true) {
-                if (std.mem.indexOfScalarPos(u8, self.buffer.items, self.cursor, '\n')) |newline| {
+                if (zig.mem.indexOfScalarPos(u8, self.buffer.items, self.cursor, '\n')) |newline| {
                     const line = trimTrailingCarriageReturn(self.buffer.items[self.cursor..newline]);
                     self.cursor = newline + 1;
                     if (self.cursor == self.buffer.items.len) {
@@ -127,7 +129,7 @@ pub fn make(comptime lib: type, comptime Event: type) type {
                 self.cursor = 0;
             } else if (self.cursor != 0) {
                 const remaining = self.buffer.items[self.cursor..];
-                lib.mem.copyForwards(u8, self.buffer.items[0..remaining.len], remaining);
+                std.mem.copyForwards(u8, self.buffer.items[0..remaining.len], remaining);
                 self.buffer.items.len = remaining.len;
                 self.cursor = 0;
             }
@@ -156,8 +158,7 @@ fn trimTrailingCarriageReturn(line: []u8) []u8 {
 pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api.TestRunner {
     return testing_api.TestRunner.fromFn(lib, 1024 * 1024, struct {
         fn run(_: *testing_api.T, allocator: lib.mem.Allocator) !void {
-            const testing = lib.testing;
-            const Http = @import("net").make(lib).http;
+            const Http = embed.net.make(lib).http;
             const Event = struct {
                 event: ?[]const u8 = null,
                 id: ?[]const u8 = null,
@@ -204,15 +205,15 @@ pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api
                 defer reader.deinit();
 
                 const first = (try reader.next()) orelse return error.ExpectedEvent;
-                try testing.expectEqualStrings("message", first.event.?);
-                try testing.expectEqualStrings("1", first.id.?);
-                try testing.expectEqualStrings("hello", first.data.?);
+                try zig.testing.expectEqualStrings("message", first.event.?);
+                try zig.testing.expectEqualStrings("1", first.id.?);
+                try zig.testing.expectEqualStrings("hello", first.data.?);
 
                 const second = (try reader.next()) orelse return error.ExpectedSecondEvent;
-                try testing.expectEqualStrings("world", second.data.?);
-                try testing.expect(second.event == null);
-                try testing.expect(second.id == null);
-                try testing.expect((try reader.next()) == null);
+                try zig.testing.expectEqualStrings("world", second.data.?);
+                try zig.testing.expect(second.event == null);
+                try zig.testing.expect(second.id == null);
+                try zig.testing.expect((try reader.next()) == null);
             }
 
             {
@@ -226,7 +227,7 @@ pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api
                 defer reader.deinit();
 
                 const value = (try reader.next()) orelse return error.ExpectedMultilineEvent;
-                try testing.expectEqualStrings("first\nsecond", value.data.?);
+                try zig.testing.expectEqualStrings("first\nsecond", value.data.?);
             }
 
             {
@@ -240,7 +241,7 @@ pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api
                 defer reader.deinit();
 
                 const value = (try reader.next()) orelse return error.ExpectedRetryEvent;
-                try testing.expectEqual(@as(?u64, 1500), value.retry);
+                try zig.testing.expectEqual(@as(?u64, 1500), value.retry);
             }
 
             {
@@ -251,7 +252,7 @@ pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api
                 };
                 var reader = Reader.init(allocator, Http.ReadCloser.init(&body));
                 defer reader.deinit();
-                try testing.expectError(error.UnexpectedEof, reader.next());
+                try zig.testing.expectError(error.UnexpectedEof, reader.next());
             }
 
             {
@@ -262,7 +263,7 @@ pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api
                 };
                 var reader = Reader.init(allocator, Http.ReadCloser.init(&body));
                 defer reader.deinit();
-                try testing.expectError(error.InvalidCharacter, reader.next());
+                try zig.testing.expectError(error.InvalidCharacter, reader.next());
             }
 
             {
@@ -278,8 +279,8 @@ pub fn TestRunner(comptime lib: type, comptime testing_api: anytype) testing_api
                 defer reader.deinit();
 
                 const value = (try reader.next()) orelse return error.ExpectedNullIdEvent;
-                try testing.expect(value.id == null);
-                try testing.expectEqualStrings("ok", value.data.?);
+                try zig.testing.expect(value.id == null);
+                try zig.testing.expectEqualStrings("ok", value.data.?);
             }
         }
     }.run);

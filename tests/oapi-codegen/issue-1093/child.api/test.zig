@@ -1,8 +1,9 @@
 const std = @import("std");
-const testing = @import("testing");
+const testing = embed.testing;
 const codegen_helpers = @import("../../codegen_helpers.zig");
 const openapi = @import("openapi");
-const embed = @import("embed_std").std;
+const embed = @import("embed");
+const lib = @import("embed_std").std;
 
 pub const Phase = enum {
     spec,
@@ -67,7 +68,7 @@ pub fn TestRunner(comptime phase: Phase) testing.TestRunner {
                     },
                 };
 
-                codegen_helpers.assertClientServerCompile(embed, files);
+                codegen_helpers.assertClientServerCompile(lib, files);
             }
         }
         }.run),

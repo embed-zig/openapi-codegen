@@ -6,9 +6,6 @@ pub fn build(b: *std.Build) void {
     const embed_dep = b.dependency("embed_zig", .{});
     const embed_mod = embed_dep.module("embed");
     const embed_std_mod = embed_dep.module("embed_std");
-    const net_mod = embed_dep.module("net");
-    const context_mod = embed_dep.module("context");
-    const embed_testing_mod = embed_dep.module("testing");
 
     const openapi_mod = b.addModule("openapi", .{
         .root_source_file = b.path("lib/openapi.zig"),
@@ -23,8 +20,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "openapi", .module = openapi_mod },
             .{ .name = "embed", .module = embed_mod },
-            .{ .name = "net", .module = net_mod },
-            .{ .name = "context", .module = context_mod },
+            .{ .name = "embed_std", .module = embed_std_mod },
         },
     });
     const oapi_codegen_fixtures_mod = b.createModule(.{
@@ -36,9 +32,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "codegen", .module = codegen_mod },
             .{ .name = "embed", .module = embed_mod },
             .{ .name = "embed_std", .module = embed_std_mod },
-            .{ .name = "net", .module = net_mod },
-            .{ .name = "context", .module = context_mod },
-            .{ .name = "testing", .module = embed_testing_mod },
             .{ .name = "helpers", .module = b.createModule(.{
                 .root_source_file = b.path("tests/oapi-codegen/helpers.zig"),
                 .target = target,
@@ -59,12 +52,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "embed_std", .module = embed_std_mod },
-            .{ .name = "net", .module = net_mod },
             .{ .name = "openapi", .module = openapi_mod },
             .{ .name = "codegen", .module = codegen_mod },
-            .{ .name = "context", .module = context_mod },
-            .{ .name = "testing", .module = embed_testing_mod },
+            .{ .name = "embed", .module = embed_mod },
+            .{ .name = "embed_std", .module = embed_std_mod },
         },
     });
     const unit_tests = b.addTest(.{
@@ -81,9 +72,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "codegen", .module = codegen_mod },
             .{ .name = "embed", .module = embed_mod },
             .{ .name = "embed_std", .module = embed_std_mod },
-            .{ .name = "net", .module = net_mod },
-            .{ .name = "context", .module = context_mod },
-            .{ .name = "testing", .module = embed_testing_mod },
         },
     });
     const examples_tests = b.addTest(.{
@@ -100,9 +88,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "codegen", .module = codegen_mod },
             .{ .name = "embed", .module = embed_mod },
             .{ .name = "embed_std", .module = embed_std_mod },
-            .{ .name = "net", .module = net_mod },
-            .{ .name = "context", .module = context_mod },
-            .{ .name = "testing", .module = embed_testing_mod },
         },
     });
     const stream_tests = b.addTest(.{

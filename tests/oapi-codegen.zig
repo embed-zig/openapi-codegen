@@ -1,5 +1,6 @@
 const std = @import("std");
-const testing = @import("testing");
+const embed = @import("embed");
+const testing = embed.testing;
 
 test "oapi-codegen" {
     std.testing.log_level = .info;

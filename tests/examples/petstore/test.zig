@@ -1,11 +1,12 @@
 const std = @import("std");
-const context = @import("context");
-const testing_api = @import("testing");
-const net_mod = @import("net");
+const context = embed.context;
+const testing_api = embed.testing;
+const net_mod = embed.net;
 const openapi = @import("openapi");
 const codegen = @import("codegen");
 
-const embed = @import("embed_std").std;
+const embed = @import("embed");
+const lib = @import("embed_std").std;
 
 /// `service.json`: paths; `structure.json`: `components` (schemas, etc.). Cross-file `$ref` uses `structure.json#/components/...`. `deletePet` includes `204` on the service document.
 const raw_service = @embedFile("service.json");
@@ -22,18 +23,18 @@ fn files() openapi.Files {
     };
 }
 
-const ClientApi = codegen.client.make(embed, files());
-const ServerApi = codegen.server.make(embed, files());
+const ClientApi = codegen.client.make(lib, files());
+const ServerApi = codegen.server.make(lib, files());
 
-const net = @import("net").make(embed);
+const net = embed.net.make(lib);
 
 const pet_id: i64 = 100;
 
 pub fn TestRunner() testing_api.TestRunner {
-    return testing_api.TestRunner.fromFn(embed, 1024 * 1024, runPetstoreExample);
+    return testing_api.TestRunner.fromFn(lib, 1024 * 1024, runPetstoreExample);
 }
 
-fn runPetstoreExample(t: *testing_api.T, alloc: embed.mem.Allocator) !void {
+fn runPetstoreExample(t: *testing_api.T, alloc: lib.mem.Allocator) !void {
     var app = AppContext{};
     var server = try ServerApi.init(alloc, &app, .{
         .addPet = Handlers.addPet,
@@ -46,7 +47,7 @@ fn runPetstoreExample(t: *testing_api.T, alloc: embed.mem.Allocator) !void {
     var srv_run = try startServer(&server);
     defer srv_run.stop(&server) catch {};
 
-    const base_url = try embed.fmt.allocPrint(alloc, "http://127.0.0.1:{d}", .{srv_run.port});
+    const base_url = try lib.fmt.allocPrint(alloc, "http://127.0.0.1:{d}", .{srv_run.port});
     defer alloc.free(base_url);
 
     var transport = try net.http.Transport.init(alloc, .{});
@@ -169,7 +170,7 @@ const Handlers = struct {
     fn addPet(
         ptr: *anyopaque,
         ctx: context.Context,
-        allocator: embed.mem.Allocator,
+        allocator: lib.mem.Allocator,
         args: ServerApi.operations.addPet.Args,
     ) !ServerApi.operations.addPet.Response {
         const app: *AppContext = @ptrCast(@alignCast(ptr));
@@ -189,7 +190,7 @@ const Handlers = struct {
     fn updatePet(
         ptr: *anyopaque,
         ctx: context.Context,
-        allocator: embed.mem.Allocator,
+        allocator: lib.mem.Allocator,
         args: ServerApi.operations.updatePet.Args,
     ) !ServerApi.operations.updatePet.Response {
         const app: *AppContext = @ptrCast(@alignCast(ptr));
@@ -212,7 +213,7 @@ const Handlers = struct {
     fn getPetById(
         ptr: *anyopaque,
         ctx: context.Context,
-        allocator: embed.mem.Allocator,
+        allocator: lib.mem.Allocator,
         args: ServerApi.operations.getPetById.Args,
     ) !ServerApi.operations.getPetById.Response {
         const app: *AppContext = @ptrCast(@alignCast(ptr));
@@ -236,7 +237,7 @@ const Handlers = struct {
     fn deletePet(
         ptr: *anyopaque,
         ctx: context.Context,
-        allocator: embed.mem.Allocator,
+        allocator: lib.mem.Allocator,
         args: ServerApi.operations.deletePet.Args,
     ) !ServerApi.operations.deletePet.Response {
         const app: *AppContext = @ptrCast(@alignCast(ptr));
@@ -266,7 +267,7 @@ const ServerRun = struct {
     listener: net_mod.Listener,
     port: u16,
     server_err: ?anyerror = null,
-    thread: embed.Thread,
+    thread: lib.Thread,
 
     fn stop(self: *@This(), server: *ServerApi) !void {
         self.listener.close();
@@ -291,7 +292,7 @@ fn startServer(server: *ServerApi) !ServerRun {
         .port = port,
         .thread = undefined,
     };
-    srv_run.thread = try embed.Thread.spawn(.{}, struct {
+    srv_run.thread = try lib.Thread.spawn(.{}, struct {
         fn exec(s: *ServerApi, ln: net_mod.Listener, err: *?anyerror) void {
             s.serve(ln) catch |serve_err| {
                 err.* = serve_err;

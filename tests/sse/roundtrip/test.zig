@@ -1,12 +1,14 @@
-const context = @import("context");
-const testing_api = @import("testing");
-const net_mod = @import("net");
+const context = embed.context;
+const testing_api = embed.testing;
+const net_mod = embed.net;
+const std = @import("std");
 const openapi = @import("openapi");
 const codegen = @import("codegen");
 
-const embed = @import("embed_std").std;
-const sse = codegen.sse.make(embed);
-const net = @import("net").make(embed);
+const embed = @import("embed");
+const lib = @import("embed_std").std;
+const sse = codegen.sse.make(lib);
+const net = embed.net.make(lib);
 
 const raw_spec = @embedFile("spec.json");
 
@@ -17,10 +19,10 @@ fn files() openapi.Files {
     };
 }
 
-const ClientApi = codegen.client.make(embed, files());
-const ServerApi = codegen.server.make(embed, files());
+const ClientApi = codegen.client.make(lib, files());
+const ServerApi = codegen.server.make(lib, files());
 
-fn runSseRoundtripTest(t: *testing_api.T, alloc: embed.mem.Allocator) !void {
+fn runSseRoundtripTest(t: *testing_api.T, alloc: lib.mem.Allocator) !void {
     var app = AppContext{};
 
     var server = try ServerApi.init(alloc, &app, .{
@@ -31,7 +33,7 @@ fn runSseRoundtripTest(t: *testing_api.T, alloc: embed.mem.Allocator) !void {
     var srv_run = try startServer(&server);
     defer srv_run.stop(&server) catch {};
 
-    const base_url = try embed.fmt.allocPrint(alloc, "http://127.0.0.1:{d}", .{srv_run.port});
+    const base_url = try lib.fmt.allocPrint(alloc, "http://127.0.0.1:{d}", .{srv_run.port});
     defer alloc.free(base_url);
 
     var transport = try net.http.Transport.init(alloc, .{});
@@ -60,27 +62,27 @@ fn runSseRoundtripTest(t: *testing_api.T, alloc: embed.mem.Allocator) !void {
             while (try stream.next()) |evt| : (index += 1) {
                 switch (index) {
                     0 => {
-                        try embed.testing.expectEqualStrings("message", evt.event.?);
-                        try embed.testing.expectEqualStrings("1", evt.id.?);
-                        try embed.testing.expectEqualStrings("hello", evt.data.?);
+                        try std.testing.expectEqualStrings("message", evt.event.?);
+                        try std.testing.expectEqualStrings("1", evt.id.?);
+                        try std.testing.expectEqualStrings("hello", evt.data.?);
                     },
                     1 => {
-                        try embed.testing.expectEqualStrings("message", evt.event.?);
-                        try embed.testing.expectEqualStrings("2", evt.id.?);
-                        try embed.testing.expectEqualStrings("multi\nline", evt.data.?);
+                        try std.testing.expectEqualStrings("message", evt.event.?);
+                        try std.testing.expectEqualStrings("2", evt.id.?);
+                        try std.testing.expectEqualStrings("multi\nline", evt.data.?);
                     },
                     2 => {
-                        try embed.testing.expectEqual(@as(?u64, 2500), evt.retry);
-                        try embed.testing.expectEqual(@as(bool, true), evt.event == null);
-                        try embed.testing.expectEqual(@as(bool, true), evt.id == null);
-                        try embed.testing.expectEqual(@as(bool, true), evt.data == null);
+                        try std.testing.expectEqual(@as(?u64, 2500), evt.retry);
+                        try std.testing.expectEqual(@as(bool, true), evt.event == null);
+                        try std.testing.expectEqual(@as(bool, true), evt.id == null);
+                        try std.testing.expectEqual(@as(bool, true), evt.data == null);
                     },
                     else => return error.UnexpectedExtraEvent,
                 }
             }
 
-            try embed.testing.expectEqual(@as(usize, 3), index);
-            try embed.testing.expectEqual(@as(usize, 3), app.sent_events);
+            try std.testing.expectEqual(@as(usize, 3), index);
+            try std.testing.expectEqual(@as(usize, 3), app.sent_events);
         },
     }
 }
@@ -95,7 +97,7 @@ const Handlers = struct {
     fn watchEvents(
         ptr: *anyopaque,
         ctx: context.Context,
-        allocator: embed.mem.Allocator,
+        allocator: lib.mem.Allocator,
         args: ServerApi.operations.watchEvents.Args,
     ) !ServerApi.operations.watchEvents.Response {
         _ = ctx;
@@ -140,7 +142,7 @@ const ServerRun = struct {
     listener: net_mod.Listener,
     port: u16,
     server_err: ?anyerror = null,
-    thread: embed.Thread,
+    thread: lib.Thread,
 
     fn stop(self: *@This(), server: *ServerApi) !void {
         self.listener.close();
@@ -165,7 +167,7 @@ fn startServer(server: *ServerApi) !ServerRun {
         .port = port,
         .thread = undefined,
     };
-    srv_run.thread = try embed.Thread.spawn(.{}, struct {
+    srv_run.thread = try lib.Thread.spawn(.{}, struct {
         fn exec(s: *ServerApi, ln: net_mod.Listener, err: *?anyerror) void {
             s.serve(ln) catch |serve_err| {
                 err.* = serve_err;
@@ -176,5 +178,5 @@ fn startServer(server: *ServerApi) !ServerRun {
 }
 
 pub fn TestRunner() testing_api.TestRunner {
-    return testing_api.TestRunner.fromFn(embed, 1024 * 1024, runSseRoundtripTest);
+    return testing_api.TestRunner.fromFn(lib, 1024 * 1024, runSseRoundtripTest);
 }

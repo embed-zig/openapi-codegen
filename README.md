@@ -7,7 +7,7 @@ Comptime-first OpenAPI 3.x tooling for Zig: parse specs, then `**codegen.models*
 ## Requirements
 
 - **Zig** ≥ `0.15.2` (see `build.zig.zon`)
-- **[embed-zig](https://github.com/embed-zig/embed-zig)** as the runtime surface for generated client/server code (`embed`, `embed_std`, `net`, `context`, …)
+- **[embed-zig](https://github.com/embed-zig/embed-zig)** as the runtime surface for generated client/server code. With `v1.1.0`, this repo uses top-level `embed` for module namespaces (`net`, `context`, `testing`, ...) and `embed_std.std` as the injected runtime `lib`.
 
 ## What you get
 
@@ -15,12 +15,12 @@ Comptime-first OpenAPI 3.x tooling for Zig: parse specs, then `**codegen.models*
 | Piece                             | Role                                                                                 |
 | --------------------------------- | ------------------------------------------------------------------------------------ |
 | `**openapi`** (`lib/openapi.zig`) | JSON parse → `Spec`; `Files` bundles one or more documents for `$ref` across layouts |
-| `**codegen.models**`              | `codegen.models.make(files)` → schema-backed model types                             |
-| `**codegen.client**`              | `codegen.client.make(embed, files)` → `ClientApi` with `operations.<operationId>`    |
-| `**codegen.server**`              | `codegen.server.make(embed, files)` → strict handler registration                    |
+| `**codegen.models`**              | `codegen.models.make(files)` → schema-backed model types                             |
+| `**codegen.client**`              | `codegen.client.make(lib, files)` → `ClientApi` with `operations.<operationId>`      |
+| `**codegen.server**`              | `codegen.server.make(lib, files)` → strict handler registration                      |
 
 
-The `**embed**` argument you pass in is the “std-like” namespace generated code uses. Examples in this repo use `**const embed = @import("embed_std").std;**` so you can mix with normal `**std**`.
+Examples in this repo use `**const embed = @import("embed");**` for module namespaces and `**const lib = @import("embed_std").std;**` for the injected std-like runtime. Generated code calls `**embed.net**`, `**embed.context**`, `**embed.testing**`, while `**lib.mem**`, `**lib.json**`, `**lib.Thread**`, and friends come from `**embed_std.std**`.
 
 ## Clone and verify
 
@@ -34,7 +34,7 @@ zig build test    # runs unit + example + tests/oapi-codegen/ fixture suites
 
 Your `build.zig.zon` should list `**openapi_codegen**` and `**embed_zig**`. Use `zig fetch --save` (or a `path` dependency) so tar URLs get a correct `**.hash**`.
 
-Wire modules like this repository’s `build.zig`: an `**openapi**` module rooted at `lib/openapi.zig`, then `**codegen**` with imports `**openapi**`, `**embed**`, `**net**`, `**context**`. Resolve paths with `**og.path("lib/openapi.zig")**` etc. (see `**std.Build.Dependency.path**` on Zig 0.15.x).
+Wire modules like this repository’s `build.zig`: create an `**openapi**` module rooted at `lib/openapi.zig`, then pass through `**embed_dep.module("embed")**` as `**embed**` and `**embed_dep.module("embed_std")**` as `**embed_std**`, then wire `**codegen**` with imports `**openapi**`, `**embed**`, and `**embed_std**`.
 
 ```zig
 const std = @import("std");
@@ -52,15 +52,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const embed_mod = embed_dep.module("embed");
+    const embed_std_mod = embed_dep.module("embed_std");
+
     const codegen_mod = b.addModule("codegen", .{
         .root_source_file = og.path("lib/codegen.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "openapi", .module = openapi_mod },
-            .{ .name = "embed", .module = embed_dep.module("embed") },
-            .{ .name = "net", .module = embed_dep.module("net") },
-            .{ .name = "context", .module = embed_dep.module("context") },
+            .{ .name = "embed", .module = embed_mod },
+            .{ .name = "embed_std", .module = embed_std_mod },
         },
     });
 
@@ -71,9 +73,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "openapi", .module = openapi_mod },
             .{ .name = "codegen", .module = codegen_mod },
-            .{ .name = "embed_std", .module = embed_dep.module("embed_std") },
-            .{ .name = "net", .module = embed_dep.module("net") },
-            .{ .name = "context", .module = embed_dep.module("context") },
+            .{ .name = "embed", .module = embed_mod },
+            .{ .name = "embed_std", .module = embed_std_mod },
         },
     });
 
@@ -83,13 +84,14 @@ pub fn build(b: *std.Build) void {
 
 ## Spec + `ClientApi` (petstore-style)
 
-The petstore example uses **two JSON files**: paths in `service.json`, `components` in `structure.json`. Both must appear in `**openapi.Files`**. The following is adapted from `**tests/examples/petstore/test.zig**`.
+The petstore example uses **two JSON files**: paths in `service.json`, `components` in `structure.json`. Both must appear in `**openapi.Files`**. The following is adapted from `**tests/examples/petstore/test.zig`**.
 
 ```zig
 const openapi = @import("openapi");
 const codegen = @import("codegen");
 
-const embed = @import("embed_std").std;
+const embed = @import("embed");
+const lib = @import("embed_std").std;
 
 const raw_service = @embedFile("service.json");
 const raw_structure = @embedFile("structure.json");
@@ -105,8 +107,8 @@ fn files() openapi.Files {
     };
 }
 
-const ClientApi = codegen.client.make(embed, files());
-const net = @import("net").make(embed);
+const ClientApi = codegen.client.make(lib, files());
+const net = embed.net.make(lib);
 ```
 
 For a single-file OpenAPI document, use one entry in `.items` and one `@embedFile` instead.
@@ -138,7 +140,7 @@ defer api.deinit();
 `send` takes `**context.Context**` as the first argument. The example test uses the embed testing harness: `**t.context()**`. In ordinary code, create a background context the same way as `**tests/oapi-codegen/strict-server/test.zig**`:
 
 ```zig
-var ctx_ns = try @import("context").make(embed).init(alloc);
+var ctx_ns = try embed.context.make(lib).init(alloc);
 defer ctx_ns.deinit();
 const bg = ctx_ns.background();
 // use `bg` wherever the example uses `t.context()`
@@ -182,7 +184,7 @@ switch (resp.value) {
 
 **5. DELETE with path + optional header (`deletePet`)**
 
-This operation shows `**.path`** together with `**.header**` (OpenAPI `in: header` / cookie-style bundles on `args`).
+This operation shows `**.path`** together with `**.header`** (OpenAPI `in: header` / cookie-style bundles on `args`).
 
 ```zig
 const resp = try api.operations.deletePet.send(t.context(), alloc, .{
@@ -196,9 +198,9 @@ switch (resp.value) {
 }
 ```
 
-**Body types:** JSON requests still use typed Zig values on `.body`. For **non-JSON request bodies** (`text/plain`, `application/octet-stream`, etc.), pass a **`net.http.ReadCloser`** on `.body` so the client can upload as a stream; on the server side, raw handlers receive that same `ReadCloser` and should `read` it incrementally, then `close` it when done.
+**Body types:** JSON requests still use typed Zig values on `.body`. For **non-JSON request bodies** (`text/plain`, `application/octet-stream`, etc.), pass a `**net.http.ReadCloser`** on `.body` so the client can upload as a stream; on the server side, raw handlers receive that same `ReadCloser` and should `read` it incrementally, then `close` it when done.
 
-**Response shape:** `send` returns a pointer-like handle with a `.value` union keyed by status (e.g. `.status_200`, `.status_404`, `.status_204`). Always `defer resp.deinit()` after you are done. JSON arms hold parsed models and are still released by the outer response handle. **Non-JSON stream bodies** (`text/plain`, `application/octet-stream`, etc.) are a **`net.http.ReadCloser`**: call `read` in a loop, then `close()` that reader yourself before the outer `resp.deinit()`. `text/event-stream` responses return `codegen.sse.Reader`: consume events, then call `stream.deinit()` before the outer `resp.deinit()`. Model types for JSON bodies live on `ClientApi.models`.
+**Response shape:** `send` returns a pointer-like handle with a `.value` union keyed by status (e.g. `.status_200`, `.status_404`, `.status_204`). Always `defer resp.deinit()` after you are done. JSON arms hold parsed models and are still released by the outer response handle. **Non-JSON stream bodies** (`text/plain`, `application/octet-stream`, etc.) are a `**net.http.ReadCloser`**: call `read` in a loop, then `close()` that reader yourself before the outer `resp.deinit()`. `text/event-stream` responses return `codegen.sse.Reader`: consume events, then call `stream.deinit()` before the outer `resp.deinit()`. Model types for JSON bodies live on `ClientApi.models`.
 
 ## Acknowledgements
 

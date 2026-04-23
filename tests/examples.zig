@@ -1,11 +1,12 @@
-const testing = @import("testing");
-const embed = @import("embed_std").std;
+const testing = embed.testing;
+const embed = @import("embed");
+const lib = @import("embed_std").std;
 
 const petstore = @import("examples/petstore/test.zig");
 const sse = @import("sse/roundtrip/test.zig");
 
 test "examples" {
-    var t = testing.T.new(embed, .examples);
+    var t = testing.T.new(lib, .examples);
     defer t.deinit();
 
     t.run("petstore", petstore.TestRunner());

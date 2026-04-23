@@ -1,12 +1,11 @@
 const std = @import("std");
+const embed = @import("embed");
 const openapi = @import("openapi");
 const models_mod = @import("models.zig");
-const context_mod = @import("context");
 
 const Files = openapi.Files;
 const Spec = openapi.Spec;
 const Type = std.builtin.Type;
-const Context = context_mod.Context;
 
 const RootFile = struct {
     name: []const u8,
@@ -85,11 +84,11 @@ const ResponseVariant = struct {
     payload_type: type,
 };
 
-pub fn make(comptime embed: type, comptime files: Files) type {
+pub fn make(comptime lib: type, comptime files: Files) type {
     @setEvalBranchQuota(300_000);
 
     const root = rootFile(files);
-    const net = @import("net").make(embed);
+    const net = embed.net.make(lib);
     const Http = net.http;
     const Models = models_mod.make(files);
     const default_base_url = copyString(defaultBaseUrl(root.spec));
@@ -97,12 +96,12 @@ pub fn make(comptime embed: type, comptime files: Files) type {
     const spec_version = copyString(root.spec.info.version);
 
     const State = struct {
-        allocator: embed.mem.Allocator,
+        allocator: lib.mem.Allocator,
         http_client: *Http.Client,
         base_url: []const u8,
     };
 
-    const Operations = makeOperations(embed, files, root, State);
+    const Operations = makeOperations(lib, files, root, State);
 
     return struct {
         state: *State,
@@ -113,9 +112,9 @@ pub fn make(comptime embed: type, comptime files: Files) type {
         pub const models = Models;
         pub const OperationSet = Operations;
         pub const HttpClient = Http.Client;
-        pub const Context = context_mod.Context;
+        pub const Context = embed.context.Context;
         pub const Options = struct {
-            allocator: embed.mem.Allocator,
+            allocator: lib.mem.Allocator,
             http_client: *Http.Client,
             base_url: []const u8 = default_base_url,
         };
@@ -155,7 +154,7 @@ pub fn make(comptime embed: type, comptime files: Files) type {
 }
 
 fn makeOperations(
-    comptime embed: type,
+    comptime lib: type,
     comptime files: Files,
     comptime root: RootFile,
     comptime State: type,
@@ -164,7 +163,7 @@ fn makeOperations(
     var fields: [operations.len]Type.StructField = undefined;
 
     for (operations, 0..) |operation_ref, i| {
-        const Operation = OperationHandle(embed, files, operation_ref, State);
+        const Operation = OperationHandle(lib, files, operation_ref, State);
         ensureUniqueFieldName(fields[0..i], operation_ref.field_name, "operation");
         fields[i] = .{
             .name = operation_ref.field_name,
@@ -184,12 +183,12 @@ fn makeOperations(
 }
 
 fn OperationHandle(
-    comptime embed: type,
+    comptime lib: type,
     comptime files: Files,
     comptime operation_ref: OperationRef,
     comptime State: type,
 ) type {
-    const net = @import("net").make(embed);
+    const net = embed.net.make(lib);
     const Http = net.http;
     const parameters_slice = collectEffectiveParameters(files, operation_ref.file_name, operation_ref.path_item, operation_ref.operation, operation_ref.field_name);
     const parameters = blk: {
@@ -209,7 +208,7 @@ fn OperationHandle(
         }
         break :blk items;
     };
-    const request_body = selectRequestBody(embed, files, operation_ref.file_name, operation_ref.operation.request_body, operation_ref.field_name);
+    const request_body = selectRequestBody(lib, files, operation_ref.file_name, operation_ref.operation.request_body, operation_ref.field_name);
     const ArgsType = makeArgsType(parameters, request_body);
     const response_variants_slice = collectResponseVariants(files, operation_ref.file_name, operation_ref.operation.responses, operation_ref.field_name);
     const response_variants = blk: {
@@ -217,8 +216,8 @@ fn OperationHandle(
         for (response_variants_slice, 0..) |variant, i| items[i] = variant;
         break :blk items;
     };
-    const ResponsePayload = makeResponseType(embed, response_variants);
-    const ResponseType = makeOwnedResponseType(embed, ResponsePayload, response_variants);
+    const ResponsePayload = makeResponseType(lib, response_variants);
+    const ResponseType = makeOwnedResponseType(lib, ResponsePayload, response_variants);
     const method = copyString(operation_ref.method);
     const path = copyString(operation_ref.path);
 
@@ -236,32 +235,13 @@ fn OperationHandle(
 
         const SendResult = if (ResponseType == void) void else *ResponseType;
 
-        pub fn send(self: Self, ctx: Context, allocator: embed.mem.Allocator, args: ArgsType) anyerror!SendResult {
-            const RawRequestBodyGuard = struct {
-                inner: Http.ReadCloser,
-                closed: bool = false,
-
-                fn init(inner: Http.ReadCloser) @This() {
-                    return .{ .inner = inner };
-                }
-
-                pub fn read(guard: *@This(), buffer: []u8) anyerror!usize {
-                    return guard.inner.read(buffer);
-                }
-
-                pub fn close(guard: *@This()) void {
-                    if (guard.closed) return;
-                    guard.closed = true;
-                    guard.inner.close();
-                }
-            };
-
-            var url_builder = try embed.ArrayList(u8).initCapacity(allocator, 0);
+        pub fn send(self: Self, ctx: embed.context.Context, allocator: lib.mem.Allocator, args: ArgsType) anyerror!SendResult {
+            var url_builder = try lib.ArrayList(u8).initCapacity(allocator, 0);
             defer url_builder.deinit(allocator);
 
-            try appendBaseUrl(embed, allocator, &url_builder, self.state.base_url, path);
-            try appendResolvedPath(embed, allocator, &url_builder, path, runtime_parameters, args);
-            try appendQueryString(embed, allocator, &url_builder, runtime_parameters, args);
+            try appendBaseUrl(lib, allocator, &url_builder, self.state.base_url, path);
+            try appendResolvedPath(lib, allocator, &url_builder, path, runtime_parameters, args);
+            try appendQueryString(lib, allocator, &url_builder, runtime_parameters, args);
 
             const raw_url = try url_builder.toOwnedSlice(allocator);
             defer allocator.free(raw_url);
@@ -270,14 +250,14 @@ fn OperationHandle(
             defer request.deinit();
             request = request.withContext(ctx);
 
-            var owned_header_values = try embed.ArrayList([]const u8).initCapacity(allocator, 0);
+            var owned_header_values = try lib.ArrayList([]const u8).initCapacity(allocator, 0);
             defer {
                 for (owned_header_values.items) |owned| allocator.free(owned);
                 owned_header_values.deinit(allocator);
             }
 
             try appendHeaderParameters(
-                embed,
+                lib,
                 allocator,
                 &request,
                 runtime_parameters,
@@ -286,7 +266,7 @@ fn OperationHandle(
             );
 
             try appendCookieParameters(
-                embed,
+                lib,
                 allocator,
                 &request,
                 runtime_parameters,
@@ -296,9 +276,7 @@ fn OperationHandle(
 
             var body_bytes: ?[]u8 = null;
             defer if (body_bytes) |owned| allocator.free(owned);
-            var raw_request_body_guard: RawRequestBodyGuard = undefined;
-            var has_raw_request_body_guard = false;
-            errdefer if (has_raw_request_body_guard) raw_request_body_guard.close();
+            var force_connection_close = false;
 
             if (request_body) |selected_body| {
                 if (@hasField(ArgsType, "body")) {
@@ -308,29 +286,24 @@ fn OperationHandle(
                             switch (@typeInfo(@TypeOf(body_value))) {
                                 .optional => {
                                     if (body_value) |payload| {
-                                        body_bytes = try encodeJsonBody(embed, allocator, payload);
+                                        body_bytes = try encodeJsonBody(lib, allocator, payload);
                                     }
                                 },
                                 else => {
-                                    body_bytes = try encodeJsonBody(embed, allocator, body_value);
+                                    body_bytes = try encodeJsonBody(lib, allocator, body_value);
                                 },
                             }
                         },
                         .raw => {
+                            force_connection_close = true;
                             switch (@typeInfo(@TypeOf(body_value))) {
                                 .optional => {
                                     if (body_value) |rc| {
-                                        raw_request_body_guard = RawRequestBodyGuard.init(rc);
-                                        has_raw_request_body_guard = true;
-                                        request = request.withBody(Http.ReadCloser.init(&raw_request_body_guard));
-                                        try request.addHeader(Http.Header.content_type, selected_body.content_type);
+                                        body_bytes = try readReadCloser(lib, allocator, rc);
                                     }
                                 },
                                 else => {
-                                    raw_request_body_guard = RawRequestBodyGuard.init(body_value);
-                                    has_raw_request_body_guard = true;
-                                    request = request.withBody(Http.ReadCloser.init(&raw_request_body_guard));
-                                    try request.addHeader(Http.Header.content_type, selected_body.content_type);
+                                    body_bytes = try readReadCloser(lib, allocator, body_value);
                                 },
                             }
                         },
@@ -343,6 +316,10 @@ fn OperationHandle(
                 request = request.withBody(Http.ReadCloser.init(&body));
                 request.content_length = @intCast(payload.len);
                 try request.addHeader(Http.Header.content_type, request_body.?.content_type);
+            }
+
+            if (force_connection_close) {
+                try request.addHeader(Http.Header.connection, "close");
             }
 
             if (responseWantsJson(response_variants)) {
@@ -358,7 +335,7 @@ fn OperationHandle(
             inline for (response_variants) |variant| {
                 if (variant.status_code) |status_code| {
                     if (response_ptr.status_code == status_code) {
-                        const out = try decodeResponseVariant(embed, ResponseType, allocator, response_ptr, variant);
+                        const out = try decodeResponseVariant(lib, ResponseType, allocator, response_ptr, variant);
                         dispose_http_response = false;
                         return out;
                     }
@@ -367,7 +344,7 @@ fn OperationHandle(
 
             inline for (response_variants) |variant| {
                 if (variant.status_code == null) {
-                    const out = try decodeResponseVariant(embed, ResponseType, allocator, response_ptr, variant);
+                    const out = try decodeResponseVariant(lib, ResponseType, allocator, response_ptr, variant);
                     dispose_http_response = false;
                     return out;
                 }
@@ -386,13 +363,13 @@ fn OperationHandle(
     };
 }
 
-fn makeOwnedResponseType(comptime embed: type, comptime ResponsePayload: type, comptime variants: anytype) type {
+fn makeOwnedResponseType(comptime lib: type, comptime ResponsePayload: type, comptime variants: anytype) type {
     if (ResponsePayload == void) return void;
 
     return struct {
-        allocator: embed.mem.Allocator,
+        allocator: lib.mem.Allocator,
         /// Heap `Response` from `Client.do`; kept alive until caller-owned stream teardown finishes.
-        http_response: *@import("net").make(embed).http.Response,
+        http_response: *embed.net.make(lib).http.Response,
         value: ResponsePayload,
         /// If a raw or SSE response has no body reader, the caller-owned stream points here.
         raw_empty_body: FixedBufferBody = .{ .bytes = "" },
@@ -815,13 +792,13 @@ fn selectParameterSchema(comptime parameter: Spec.Parameter) ?struct {
 }
 
 fn selectRequestBody(
-    comptime embed: type,
+    comptime lib: type,
     comptime files: Files,
     comptime current_file_name: []const u8,
     comptime request_body_or_ref: ?Spec.RequestBodyOrRef,
     comptime context_name: []const u8,
 ) ?SelectedRequestBody {
-    const Http = @import("net").make(embed).http;
+    const Http = embed.net.make(lib).http;
     const request_body = request_body_or_ref orelse return null;
     const resolved = resolveRequestBodyOrRef(files, current_file_name, request_body);
 
@@ -926,11 +903,11 @@ fn responseVariant(
     };
 }
 
-fn makeResponseType(comptime embed: type, comptime variants: anytype) type {
+fn makeResponseType(comptime lib: type, comptime variants: anytype) type {
     if (variants.len == 0) return void;
 
-    const Http = @import("net").make(embed).http;
-    const Sse = @import("../sse.zig").make(embed);
+    const Http = embed.net.make(lib).http;
+    const Sse = @import("../sse.zig").make(lib);
 
     var enum_fields: [variants.len]Type.EnumField = undefined;
     var union_fields: [variants.len]Type.UnionField = undefined;
@@ -938,7 +915,7 @@ fn makeResponseType(comptime embed: type, comptime variants: anytype) type {
     inline for (variants, 0..) |variant, index| {
         const payload_type = switch (variant.payload_kind) {
             .none => void,
-            .json => embed.json.Parsed(variant.payload_type),
+            .json => lib.json.Parsed(variant.payload_type),
             .raw => Http.ReadCloser,
             .sse => Sse.Reader,
         };
@@ -979,9 +956,9 @@ fn countParameters(comptime parameters: anytype, comptime location: Spec.Paramet
 }
 
 fn appendBaseUrl(
-    comptime embed: type,
-    allocator: embed.mem.Allocator,
-    builder: *embed.ArrayList(u8),
+    comptime lib: type,
+    allocator: lib.mem.Allocator,
+    builder: *lib.ArrayList(u8),
     base_url: []const u8,
     path: []const u8,
 ) !void {
@@ -994,9 +971,9 @@ fn appendBaseUrl(
 }
 
 fn appendResolvedPath(
-    comptime embed: type,
-    allocator: embed.mem.Allocator,
-    builder: *embed.ArrayList(u8),
+    comptime lib: type,
+    allocator: lib.mem.Allocator,
+    builder: *lib.ArrayList(u8),
     path_template: []const u8,
     comptime parameters: anytype,
     args: anytype,
@@ -1021,7 +998,7 @@ fn appendResolvedPath(
         inline for (parameters) |resolved| {
             if (resolved.location != .path) continue;
             if (std.mem.eql(u8, resolved.original_name, placeholder)) {
-                const rendered = try serializePathFieldValue(embed, allocator, @field(args.path, resolved.field_name), resolved.encoding);
+                const rendered = try serializePathFieldValue(lib, allocator, @field(args.path, resolved.field_name), resolved.encoding);
                 defer allocator.free(rendered);
                 try builder.appendSlice(allocator, rendered);
                 index += close_index + 1;
@@ -1036,9 +1013,9 @@ fn appendResolvedPath(
 }
 
 fn appendQueryString(
-    comptime embed: type,
-    allocator: embed.mem.Allocator,
-    builder: *embed.ArrayList(u8),
+    comptime lib: type,
+    allocator: lib.mem.Allocator,
+    builder: *lib.ArrayList(u8),
     comptime parameters: anytype,
     args: anytype,
 ) !void {
@@ -1049,7 +1026,7 @@ fn appendQueryString(
         if (resolved.location != .query) continue;
 
         if (try appendMaybeNamedValueWithEncoding(
-            embed,
+            lib,
             allocator,
             builder,
             resolved.original_name,
@@ -1063,12 +1040,12 @@ fn appendQueryString(
 }
 
 fn appendHeaderParameters(
-    comptime embed: type,
-    allocator: embed.mem.Allocator,
+    comptime lib: type,
+    allocator: lib.mem.Allocator,
     request: anytype,
     comptime parameters: anytype,
     args: anytype,
-    owned_values: *embed.ArrayList([]const u8),
+    owned_values: *lib.ArrayList([]const u8),
 ) !void {
     if (!@hasField(@TypeOf(args), "header")) return;
 
@@ -1079,13 +1056,13 @@ fn appendHeaderParameters(
         switch (@typeInfo(@TypeOf(value))) {
             .optional => {
                 if (value) |unwrapped| {
-                    const rendered = try serializeParameterValue(embed, allocator, unwrapped, resolved.encoding);
+                    const rendered = try serializeParameterValue(lib, allocator, unwrapped, resolved.encoding);
                     try owned_values.append(allocator, rendered);
                     try request.addHeader(resolved.original_name, rendered);
                 }
             },
             else => {
-                const rendered = try serializeParameterValue(embed, allocator, value, resolved.encoding);
+                const rendered = try serializeParameterValue(lib, allocator, value, resolved.encoding);
                 try owned_values.append(allocator, rendered);
                 try request.addHeader(resolved.original_name, rendered);
             },
@@ -1094,16 +1071,16 @@ fn appendHeaderParameters(
 }
 
 fn appendCookieParameters(
-    comptime embed: type,
-    allocator: embed.mem.Allocator,
+    comptime lib: type,
+    allocator: lib.mem.Allocator,
     request: anytype,
     comptime parameters: anytype,
     args: anytype,
-    owned_values: *embed.ArrayList([]const u8),
+    owned_values: *lib.ArrayList([]const u8),
 ) !void {
     if (!@hasField(@TypeOf(args), "cookie")) return;
 
-    var builder = try embed.ArrayList(u8).initCapacity(allocator, 0);
+    var builder = try lib.ArrayList(u8).initCapacity(allocator, 0);
     defer builder.deinit(allocator);
 
     var first = true;
@@ -1112,7 +1089,7 @@ fn appendCookieParameters(
 
         const value = @field(args.cookie, resolved.field_name);
         if (try appendMaybeNamedValueWithEncoding(
-            embed,
+            lib,
             allocator,
             &builder,
             resolved.original_name,
@@ -1132,20 +1109,20 @@ fn appendCookieParameters(
 }
 
 fn appendMaybeNamedValue(
-    comptime embed: type,
-    allocator: embed.mem.Allocator,
-    builder: *embed.ArrayList(u8),
+    comptime lib: type,
+    allocator: lib.mem.Allocator,
+    builder: *lib.ArrayList(u8),
     name: []const u8,
     value: anytype,
     first: *bool,
 ) !bool {
-    return appendMaybeNamedValueWithEncoding(embed, allocator, builder, name, value, .scalar, first, "?", "&");
+    return appendMaybeNamedValueWithEncoding(lib, allocator, builder, name, value, .scalar, first, "?", "&");
 }
 
 fn appendMaybeNamedValueWithEncoding(
-    comptime embed: type,
-    allocator: embed.mem.Allocator,
-    builder: *embed.ArrayList(u8),
+    comptime lib: type,
+    allocator: lib.mem.Allocator,
+    builder: *lib.ArrayList(u8),
     name: []const u8,
     value: anytype,
     comptime encoding: ParameterEncoding,
@@ -1156,22 +1133,22 @@ fn appendMaybeNamedValueWithEncoding(
     switch (@typeInfo(@TypeOf(value))) {
         .optional => {
             if (value) |unwrapped| {
-                try appendNamedValue(embed, allocator, builder, name, unwrapped, encoding, first, first_separator, separator);
+                try appendNamedValue(lib, allocator, builder, name, unwrapped, encoding, first, first_separator, separator);
                 return true;
             }
             return false;
         },
         else => {
-            try appendNamedValue(embed, allocator, builder, name, value, encoding, first, first_separator, separator);
+            try appendNamedValue(lib, allocator, builder, name, value, encoding, first, first_separator, separator);
             return true;
         },
     }
 }
 
 fn appendNamedValue(
-    comptime embed: type,
-    allocator: embed.mem.Allocator,
-    builder: *embed.ArrayList(u8),
+    comptime lib: type,
+    allocator: lib.mem.Allocator,
+    builder: *lib.ArrayList(u8),
     name: []const u8,
     value: anytype,
     comptime encoding: ParameterEncoding,
@@ -1179,7 +1156,7 @@ fn appendNamedValue(
     comptime first_separator: []const u8,
     comptime separator: []const u8,
 ) !void {
-    const rendered = try serializeParameterValue(embed, allocator, value, encoding);
+    const rendered = try serializeParameterValue(lib, allocator, value, encoding);
     defer allocator.free(rendered);
 
     try builder.appendSlice(allocator, if (first.*) first_separator else separator);
@@ -1189,38 +1166,38 @@ fn appendNamedValue(
     try builder.appendSlice(allocator, rendered);
 }
 
-fn serializeFieldValue(comptime embed: type, allocator: embed.mem.Allocator, value: anytype) ![]u8 {
+fn serializeFieldValue(comptime lib: type, allocator: lib.mem.Allocator, value: anytype) ![]u8 {
     return switch (@typeInfo(@TypeOf(value))) {
-        .optional => if (value) |unwrapped| serializeScalar(embed, allocator, unwrapped) else error.MissingRequiredArgument,
-        else => serializeScalar(embed, allocator, value),
+        .optional => if (value) |unwrapped| serializeScalar(lib, allocator, unwrapped) else error.MissingRequiredArgument,
+        else => serializeScalar(lib, allocator, value),
     };
 }
 
 fn serializePathFieldValue(
-    comptime embed: type,
-    allocator: embed.mem.Allocator,
+    comptime lib: type,
+    allocator: lib.mem.Allocator,
     value: anytype,
     comptime encoding: ParameterEncoding,
 ) ![]u8 {
     return switch (@typeInfo(@TypeOf(value))) {
-        .optional => if (value) |unwrapped| serializeParameterValue(embed, allocator, unwrapped, encoding) else error.MissingRequiredArgument,
-        else => serializeParameterValue(embed, allocator, value, encoding),
+        .optional => if (value) |unwrapped| serializeParameterValue(lib, allocator, unwrapped, encoding) else error.MissingRequiredArgument,
+        else => serializeParameterValue(lib, allocator, value, encoding),
     };
 }
 
 fn serializeParameterValue(
-    comptime embed: type,
-    allocator: embed.mem.Allocator,
+    comptime lib: type,
+    allocator: lib.mem.Allocator,
     value: anytype,
     comptime encoding: ParameterEncoding,
 ) ![]u8 {
     return switch (encoding) {
-        .scalar => serializeScalar(embed, allocator, value),
-        .json => encodeJsonBody(embed, allocator, value),
+        .scalar => serializeScalar(lib, allocator, value),
+        .json => encodeJsonBody(lib, allocator, value),
     };
 }
 
-fn serializeScalar(comptime embed: type, allocator: embed.mem.Allocator, value: anytype) ![]u8 {
+fn serializeScalar(comptime lib: type, allocator: lib.mem.Allocator, value: anytype) ![]u8 {
     const T = @TypeOf(value);
     return switch (@typeInfo(T)) {
         .pointer => |pointer| {
@@ -1229,7 +1206,7 @@ fn serializeScalar(comptime embed: type, allocator: embed.mem.Allocator, value: 
             }
             return error.UnsupportedParameterType;
         },
-        .int, .comptime_int, .float, .comptime_float => try embed.fmt.allocPrint(allocator, "{}", .{value}),
+        .int, .comptime_int, .float, .comptime_float => try lib.fmt.allocPrint(allocator, "{}", .{value}),
         .bool => try allocator.dupe(u8, if (value) "true" else "false"),
         else => error.UnsupportedParameterType,
     };
@@ -1239,13 +1216,28 @@ fn HttpHeaderCookieName() []const u8 {
     return "Cookie";
 }
 
-fn encodeJsonBody(comptime embed: type, allocator: embed.mem.Allocator, value: anytype) ![]u8 {
-    return try embed.fmt.allocPrint(allocator, "{f}", .{embed.json.fmt(value, .{})});
+fn encodeJsonBody(comptime lib: type, allocator: lib.mem.Allocator, value: anytype) ![]u8 {
+    return try lib.fmt.allocPrint(allocator, "{f}", .{lib.json.fmt(value, .{})});
 }
 
-fn readResponseBody(comptime embed: type, allocator: embed.mem.Allocator, response: *const @import("net").make(embed).http.Response) ![]u8 {
+fn readReadCloser(comptime lib: type, allocator: lib.mem.Allocator, reader: anytype) ![]u8 {
+    defer reader.close();
+    var list = try lib.ArrayList(u8).initCapacity(allocator, 0);
+    defer list.deinit(allocator);
+
+    var buffer: [1024]u8 = undefined;
+    while (true) {
+        const amount = try reader.read(&buffer);
+        if (amount == 0) break;
+        try list.appendSlice(allocator, buffer[0..amount]);
+    }
+
+    return try list.toOwnedSlice(allocator);
+}
+
+fn readResponseBody(comptime lib: type, allocator: lib.mem.Allocator, response: *const embed.net.make(lib).http.Response) ![]u8 {
     var body = response.body() orelse return try allocator.alloc(u8, 0);
-    var list = try embed.ArrayList(u8).initCapacity(allocator, 0);
+    var list = try lib.ArrayList(u8).initCapacity(allocator, 0);
     defer list.deinit(allocator);
 
     var buffer: [1024]u8 = undefined;
@@ -1259,16 +1251,16 @@ fn readResponseBody(comptime embed: type, allocator: embed.mem.Allocator, respon
 }
 
 fn decodeResponseVariant(
-    comptime embed: type,
+    comptime lib: type,
     comptime ResponseType: type,
-    allocator: embed.mem.Allocator,
-    response: *@import("net").make(embed).http.Response,
+    allocator: lib.mem.Allocator,
+    response: *embed.net.make(lib).http.Response,
     comptime variant: ResponseVariant,
 ) !if (ResponseType == void) void else *ResponseType {
     if (ResponseType == void) return;
 
-    const Http = @import("net").make(embed).http;
-    const Sse = @import("../sse.zig").make(embed);
+    const Http = embed.net.make(lib).http;
+    const Sse = @import("../sse.zig").make(lib);
     const PayloadType = @FieldType(ResponseType, "value");
 
     switch (variant.payload_kind) {
@@ -1307,10 +1299,10 @@ fn decodeResponseVariant(
             return owned;
         },
         .json => {
-            const response_bytes = try readResponseBody(embed, allocator, response);
+            const response_bytes = try readResponseBody(lib, allocator, response);
             defer allocator.free(response_bytes);
 
-            const parsed = try embed.json.parseFromSlice(variant.payload_type, allocator, response_bytes, .{
+            const parsed = try lib.json.parseFromSlice(variant.payload_type, allocator, response_bytes, .{
                 .allocate = .alloc_always,
             });
             const owned = try allocator.create(ResponseType);

@@ -7,7 +7,7 @@
 ## 环境要求
 
 - **Zig** ≥ `0.15.2`（见 `build.zig.zon`）
-- **[embed-zig](https://github.com/embed-zig/embed-zig)**：提供 `embed`、`embed_std`、`net`、`context` 等
+- **[embed-zig](https://github.com/embed-zig/embed-zig)**：提供生成 client/server 所需的运行时。本仓库在 `v1.1.0` 之后直接使用顶层 `embed` 作为模块命名空间（`net`、`context`、`testing` 等），并用 `embed_std.std` 作为注入的运行时 `lib`。
 
 ## 能力概览
 
@@ -16,11 +16,11 @@
 | -------------------------------- | -------------------------------------------------------------------------------------------- |
 | `**openapi**`（`lib/openapi.zig`） | JSON → `Spec`；`**Files**` 挂载多文档，支持跨文件 `**$ref**`                                             |
 | `**codegen.models**`             | `**codegen.models.make(files)**` → schema 对应 model 类型                                        |
-| `**codegen.client**`             | `**codegen.client.make(embed, files)**` → `**ClientApi**`，操作为 `**operations.<operationId>**` |
-| `**codegen.server**`             | `**codegen.server.make(embed, files)**` → 严格 handler 注册                                      |
+| `**codegen.client**`             | `**codegen.client.make(lib, files)**` → `**ClientApi**`，操作为 `**operations.<operationId>**`   |
+| `**codegen.server**`             | `**codegen.server.make(lib, files)**` → 严格 handler 注册                                        |
 
 
-示例里通常写 `**const embed = @import("embed_std").std;**`，与 `**std**` 混用。
+示例里统一写 `**const embed = @import("embed");**` 和 `**const lib = @import("embed_std").std;**`。`**embed.net**`、`**embed.context**`、`**embed.testing**` 走顶层模块；`**lib.mem**`、`**lib.json**`、`**lib.Thread**` 等 std-like 能力来自 `**embed_std.std**`。
 
 ## 克隆后自测
 
@@ -32,7 +32,7 @@ zig build test    # 运行 unit + example + tests/oapi-codegen/ 夹具
 
 ## 在你自己的工程里依赖
 
-在 `**build.zig.zon**` 声明 `**openapi_codegen**` 与 `**embed_zig**`；远端包用 `**zig fetch --save**` 写入 `**.hash**`。下面 `**build.zig**` 接线与本仓库一致。
+在 `**build.zig.zon**` 声明 `**openapi_codegen**` 与 `**embed_zig**`；远端包用 `**zig fetch --save**` 写入 `**.hash**`。接线时先创建 `**openapi**` 模块，再直接透传 `**embed_dep.module("embed")**` 和 `**embed_dep.module("embed_std")**`，最后把它们传给 `**codegen**`。
 
 ```zig
 const std = @import("std");
@@ -50,15 +50,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const embed_mod = embed_dep.module("embed");
+    const embed_std_mod = embed_dep.module("embed_std");
+
     const codegen_mod = b.addModule("codegen", .{
         .root_source_file = og.path("lib/codegen.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "openapi", .module = openapi_mod },
-            .{ .name = "embed", .module = embed_dep.module("embed") },
-            .{ .name = "net", .module = embed_dep.module("net") },
-            .{ .name = "context", .module = embed_dep.module("context") },
+            .{ .name = "embed", .module = embed_mod },
+            .{ .name = "embed_std", .module = embed_std_mod },
         },
     });
 
@@ -69,9 +71,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "openapi", .module = openapi_mod },
             .{ .name = "codegen", .module = codegen_mod },
-            .{ .name = "embed_std", .module = embed_dep.module("embed_std") },
-            .{ .name = "net", .module = embed_dep.module("net") },
-            .{ .name = "context", .module = embed_dep.module("context") },
+            .{ .name = "embed", .module = embed_mod },
+            .{ .name = "embed_std", .module = embed_std_mod },
         },
     });
 
@@ -87,7 +88,8 @@ pub fn build(b: *std.Build) void {
 const openapi = @import("openapi");
 const codegen = @import("codegen");
 
-const embed = @import("embed_std").std;
+const embed = @import("embed");
+const lib = @import("embed_std").std;
 
 const raw_service = @embedFile("service.json");
 const raw_structure = @embedFile("structure.json");
@@ -103,8 +105,8 @@ fn files() openapi.Files {
     };
 }
 
-const ClientApi = codegen.client.make(embed, files());
-const net = @import("net").make(embed);
+const ClientApi = codegen.client.make(lib, files());
+const net = embed.net.make(lib);
 ```
 
 若只有一份 OpenAPI JSON，`**.items**` 里放一条即可。
@@ -136,7 +138,7 @@ defer api.deinit();
 示例测试里使用 harness 的 `**t.context()**`。在普通程序里可像 `**tests/oapi-codegen/strict-server/test.zig**` 那样：
 
 ```zig
-var ctx_ns = try @import("context").make(embed).init(alloc);
+var ctx_ns = try embed.context.make(lib).init(alloc);
 defer ctx_ns.deinit();
 const bg = ctx_ns.background();
 // 下面凡示例写 `t.context()` 的地方可换成 `bg`

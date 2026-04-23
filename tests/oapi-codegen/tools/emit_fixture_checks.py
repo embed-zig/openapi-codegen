@@ -314,8 +314,10 @@ def ensure_std_testing_openapi_imports(text: str) -> str:
     to_add: list[str] = []
     if re.search(r"^const std = @import\(\"std\"\);", text, re.MULTILINE) is None:
         to_add.append('const std = @import("std");')
-    if re.search(r"^const testing = @import\(\"testing\"\);", text, re.MULTILINE) is None:
-        to_add.append('const testing = @import("testing");')
+    if re.search(r"^const embed = @import\(\"embed\"\);", text, re.MULTILINE) is None:
+        to_add.append('const embed = @import("embed");')
+    if re.search(r"^const testing = embed\.testing;", text, re.MULTILINE) is None:
+        to_add.append('const testing = embed.testing;')
     if re.search(r"^const openapi = @import\(\"openapi\"\);", text, re.MULTILINE) is None:
         to_add.append('const openapi = @import("openapi");')
     if not to_add:
@@ -340,7 +342,8 @@ def migrate_parse_assert_fixture_test(
 
 
 RUNNER_TEMPLATE_SINGLE = """const std = @import("std");
-const testing = @import("testing");
+const embed = @import("embed");
+const testing = embed.testing;
 const openapi = @import("openapi");
 const Spec = openapi.Spec;
 

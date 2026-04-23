@@ -33,8 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .embed_zig = .{
-            .url = "https://codeload.github.com/embed-zig/embed-zig/tar.gz/e4c462714232c7211d9a96b67ec0c3fc1b6a4b3f",
-            .hash = "embed_zig-0.0.0-prAy_N51UAAQTlauAHIxZh0Ovvz89unjkPtqdhzsbDKE",
+            .url = "https://codeload.github.com/embed-zig/embed-zig/tar.gz/refs/tags/v1.1.0",
+            .hash = "embed_zig-1.1.0-prAy_J14VAC48mxSkq8VNM1VThXqedgqSXof5wiEQ-tK",
         },
     },
     .paths = .{

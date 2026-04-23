@@ -1,12 +1,13 @@
-const testing = @import("testing");
+const testing = embed.testing;
 const std = @import("std");
 const openapi = @import("openapi");
 const codegen = @import("codegen");
-const net_mod = @import("net");
+const net_mod = embed.net;
 
-const embed = @import("embed_std").std;
-const Context = @import("context").Context;
-const net = @import("net").make(embed);
+const embed = @import("embed");
+const lib = @import("embed_std").std;
+const Context = embed.context.Context;
+const net = embed.net.make(lib);
 
 const ClientApi = blk: {
     const spec = openapi.json.parse(@embedFile("spec.json"));
@@ -18,7 +19,7 @@ const ClientApi = blk: {
             },
         },
     };
-    break :blk codegen.client.make(embed, files);
+    break :blk codegen.client.make(lib, files);
 };
 
 const ServerApi = blk: {
@@ -31,12 +32,12 @@ const ServerApi = blk: {
             },
         },
     };
-    break :blk codegen.server.make(embed, files);
+    break :blk codegen.server.make(lib, files);
 };
 
-fn readAllReadCloser(allocator: embed.mem.Allocator, reader: net.http.ReadCloser) ![]u8 {
+fn readAllReadCloser(allocator: lib.mem.Allocator, reader: net.http.ReadCloser) ![]u8 {
     defer reader.close();
-    var list = try embed.ArrayList(u8).initCapacity(allocator, 0);
+    var list = try lib.ArrayList(u8).initCapacity(allocator, 0);
     defer list.deinit(allocator);
     var buf: [1024]u8 = undefined;
     while (true) {
@@ -242,7 +243,7 @@ const AppContext = struct {
 };
 
 const Handlers = struct {
-    fn JSONExample(ctx_ptr: *anyopaque, req_ctx: Context, allocator: embed.mem.Allocator, args: ServerApi.operations.JSONExample.Args) !ServerApi.operations.JSONExample.Response {
+    fn JSONExample(ctx_ptr: *anyopaque, req_ctx: Context, allocator: lib.mem.Allocator, args: ServerApi.operations.JSONExample.Args) !ServerApi.operations.JSONExample.Response {
         _ = req_ctx;
         _ = allocator;
         const ctx: *AppContext = @ptrCast(@alignCast(ctx_ptr));
@@ -255,7 +256,7 @@ const Handlers = struct {
         return .{ .status_200 = .{ .value = "ok" } };
     }
 
-    fn TextExample(ctx_ptr: *anyopaque, req_ctx: Context, allocator: embed.mem.Allocator, args: ServerApi.operations.TextExample.Args) !ServerApi.operations.TextExample.Response {
+    fn TextExample(ctx_ptr: *anyopaque, req_ctx: Context, allocator: lib.mem.Allocator, args: ServerApi.operations.TextExample.Args) !ServerApi.operations.TextExample.Response {
         _ = req_ctx;
         const ctx: *AppContext = @ptrCast(@alignCast(ctx_ptr));
         ctx.raw_call_count += 1;
@@ -264,7 +265,7 @@ const Handlers = struct {
         return .{ .status_200 = echoed };
     }
 
-    fn UnknownExample(ctx_ptr: *anyopaque, req_ctx: Context, allocator: embed.mem.Allocator, args: ServerApi.operations.UnknownExample.Args) !ServerApi.operations.UnknownExample.Response {
+    fn UnknownExample(ctx_ptr: *anyopaque, req_ctx: Context, allocator: lib.mem.Allocator, args: ServerApi.operations.UnknownExample.Args) !ServerApi.operations.UnknownExample.Response {
         _ = req_ctx;
         const ctx: *AppContext = @ptrCast(@alignCast(ctx_ptr));
         ctx.raw_call_count += 1;
@@ -278,7 +279,7 @@ const ServerRun = struct {
     listener: net_mod.Listener,
     port: u16,
     server_err: ?anyerror = null,
-    thread: embed.Thread,
+    thread: lib.Thread,
 
     fn stop(self: *@This(), server: *ServerApi) !void {
         self.listener.close();
@@ -303,7 +304,7 @@ fn startServer(server: *ServerApi) !ServerRun {
         .port = port,
         .thread = undefined,
     };
-    run.thread = try embed.Thread.spawn(.{}, struct {
+    run.thread = try lib.Thread.spawn(.{}, struct {
         fn exec(s: *ServerApi, ln: net_mod.Listener, err: *?anyerror) void {
             s.serve(ln) catch |serve_err| {
                 err.* = serve_err;
@@ -315,7 +316,7 @@ fn startServer(server: *ServerApi) !ServerRun {
 
 fn run_generated_client_returns_status_union_responses(t: *testing.T, allocator: std.mem.Allocator) !void {
     _ = t;
-    var ctx_ns = try @import("context").make(embed).init(allocator);
+    var ctx_ns = try embed.context.make(lib).init(allocator);
     defer ctx_ns.deinit();
     const bg = ctx_ns.background();
 
@@ -330,7 +331,7 @@ fn run_generated_client_returns_status_union_responses(t: *testing.T, allocator:
     var run_inner = try startServer(&server);
     defer run_inner.stop(&server) catch {};
 
-    const base_url = try embed.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{run_inner.port});
+    const base_url = try lib.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{run_inner.port});
     defer allocator.free(base_url);
 
     var transport = try net.http.Transport.init(allocator, .{});
@@ -374,7 +375,7 @@ fn run_generated_client_returns_status_union_responses(t: *testing.T, allocator:
 
 fn run_generated_client_and_server_exchange_raw_request_and_response(t: *testing.T, allocator: std.mem.Allocator) !void {
     _ = t;
-    var ctx_ns = try @import("context").make(embed).init(allocator);
+    var ctx_ns = try embed.context.make(lib).init(allocator);
     defer ctx_ns.deinit();
     const bg = ctx_ns.background();
 
@@ -389,7 +390,7 @@ fn run_generated_client_and_server_exchange_raw_request_and_response(t: *testing
     var run_inner = try startServer(&server);
     defer run_inner.stop(&server) catch {};
 
-    const base_url = try embed.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{run_inner.port});
+    const base_url = try lib.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{run_inner.port});
     defer allocator.free(base_url);
 
     var transport = try net.http.Transport.init(allocator, .{});
@@ -451,7 +452,7 @@ fn run_generated_client_and_server_exchange_raw_request_and_response(t: *testing
 
 fn run_generated_client_closes_raw_request_stream_on_transport_error(t: *testing.T, allocator: std.mem.Allocator) !void {
     _ = t;
-    var ctx_ns = try @import("context").make(embed).init(allocator);
+    var ctx_ns = try embed.context.make(lib).init(allocator);
     defer ctx_ns.deinit();
     const bg = ctx_ns.background();
 
